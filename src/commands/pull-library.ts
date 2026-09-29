@@ -1,10 +1,11 @@
+import { find_dev_workspace, resolve_dev_server } from '../utils/dev-runtime.js'
 import fs from 'fs/promises'
 import path from 'path'
 import chalk from 'chalk'
 import ora from 'ora'
 import extract from 'extract-zip'
 import { get_auth_token } from '../utils/auth.js'
-import { normalize_server_url } from '../utils/server-config.js'
+import { read_server_config, normalize_server_url } from '../utils/server-config.js'
 
 interface PullLibraryOptions {
 	server?: string
@@ -13,6 +14,13 @@ interface PullLibraryOptions {
 }
 
 async function detect_server(): Promise<string | null> {
+	const workspace = await find_dev_workspace(process.cwd())
+	if (workspace) {
+		const config = await read_server_config(workspace)
+		const server = await resolve_dev_server(workspace, config.port)
+		if (!server.running) throw new Error(`No running Primo server for this workspace. Start primo dev, or pass --server <url>.`)
+		return server.url
+	}
 	const ports = [3000, 8080, 5173]
 
 	for (const port of ports) {

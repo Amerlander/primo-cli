@@ -66,7 +66,7 @@ program
 	.command('add <site>')
 	.description('Register an existing sites/ folder with the workspace CMS, then exit')
 	.option('-d, --dir <dir>', 'Workspace directory', '.')
-	.option('-p, --port <port>', 'Port', '3000')
+	.option('-p, --port <port>', 'Local port (server.yaml, otherwise 3000)')
 	.addHelpText('after', `
 Creating a folder under ${chalk.cyan('sites/')} isn't enough to make it appear in the
 dashboard — its records must be imported into the workspace database. This
@@ -88,7 +88,7 @@ program
 	.command('dev')
 	.description('Start local CMS')
 	.option('-d, --dir <dir>', 'Site directory', '.')
-	.option('-p, --port <port>', 'Port', '3000')
+	.option('-p, --port <port>', 'Local port (server.yaml, otherwise 3000)')
 	.option('-f, --force', 'Kill existing processes on the port')
 	.option('--author <mode>', 'Who is authoring this session: "files" (push only; CMS UI is read-only — default), "cms" (CMS edits write to files; file edits revert), "both" (bidirectional; CMS edits often lost on conflict — beta)', 'files')
 	.action(dev_server)

@@ -1,3 +1,4 @@
+import { resolve_dev_server } from '../utils/dev-runtime.js'
 import fs from 'fs/promises'
 import path from 'path'
 import chalk from 'chalk'
@@ -68,6 +69,7 @@ export async function build_site_preview(site_dir_input: string, api_url_overrid
 			throw new Error(`No ${SERVER_CONFIG_FILE} found above ${site_dir}. Run \`primo preview\` from inside a workspace.`)
 		}
 		api_url = `http://127.0.0.1:${workspace.port}`
+		if (!workspace.running) throw new Error(`Could not reach the Primo server at ${api_url}. Start primo dev for this workspace.`)
 	}
 
 	const token = await dev_auth(api_url)
@@ -111,13 +113,14 @@ async function read_sync(site_dir: string): Promise<SyncStatus | null> {
 	}
 }
 
-async function find_workspace(site_dir: string): Promise<{ dir: string; port: number } | null> {
+async function find_workspace(site_dir: string): Promise<{ dir: string; port: number; running: boolean } | null> {
 	let dir = site_dir
 	for (;;) {
 		try {
 			await fs.access(path.join(dir, SERVER_CONFIG_FILE))
 			const config = await read_server_config(dir)
-			return { dir, port: config.port ?? 3000 }
+			const server = await resolve_dev_server(dir, config.port)
+			return { dir, port: server.port, running: server.running }
 		} catch {
 			// keep walking up
 		}

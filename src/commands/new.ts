@@ -1,3 +1,4 @@
+import { resolve_dev_server } from '../utils/dev-runtime.js'
 import fs from 'fs/promises'
 import path from 'path'
 import chalk from 'chalk'
@@ -328,12 +329,7 @@ sections:
 
 		spinner.succeed(`Site created: ${chalk.cyan(site_dir)}`)
 
-		// Check if server is already running. Read the workspace's configured
-		// port (mirroring `primo dev`, which uses server_config.port) rather than
-		// assuming 3000 — otherwise on a custom-port workspace we'd probe the
-		// wrong port, miss the running server, and print links to a dead port.
-		const port = server_config.port ?? 3000
-		const server_running = await is_server_running(port)
+		const { port, running: server_running } = await resolve_dev_server(base_dir, server_config.port)
 
 		if (server_running) {
 			// A `primo dev` is already running. Ask it to reload and pick up the
@@ -411,7 +407,7 @@ sections:
 		} else if (!options.skipDev) {
 			// No server running, start one
 			console.log('')
-			await dev_server({ dir: base_dir, port: String(port) })
+			await dev_server({ dir: base_dir })
 		} else {
 			console.log('')
 			console.log(chalk.dim(`  ${display_name} was created on disk but isn't registered yet.`))
@@ -452,20 +448,6 @@ function generate_id(): string {
 		id += chars[Math.floor(Math.random() * chars.length)]
 	}
 	return id
-}
-
-async function is_server_running(port: number): Promise<boolean> {
-	try {
-		const controller = new AbortController()
-		const timeout = setTimeout(() => controller.abort(), 1000)
-		const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
-			signal: controller.signal
-		})
-		clearTimeout(timeout)
-		return response.ok
-	} catch {
-		return false
-	}
 }
 
 export function generate_agent_md(): string {

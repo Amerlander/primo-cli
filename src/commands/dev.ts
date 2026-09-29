@@ -3,6 +3,10 @@ import path from 'path'
 import { createHash, randomInt } from 'crypto'
 import chalk from 'chalk'
 import ora from 'ora'
+import inquirer from 'inquirer'
+import http, { type RequestListener } from 'http'
+import { requested_dev_port, select_dev_port, is_port_in_use } from '../utils/dev-port.js'
+import { claim_dev_runtime, read_dev_runtime, runtime_has_live_process, record_cms_process } from '../utils/dev-runtime.js'
 import { spawn, execFileSync, type ChildProcess } from 'child_process'
 import archiver from 'archiver'
 import extract from 'extract-zip'
@@ -16,7 +20,7 @@ import { normalize_site } from './validate.js'
 
 interface DevOptions {
 	dir: string
-	port: string
+	port?: string
 	force?: boolean
 	author?: string
 }
@@ -734,19 +738,6 @@ async function with_site_import_lock<T>(site_dir: string, config: SiteConfig, fn
 	}
 }
 
-// Check if a port is in use
-async function is_port_in_use(port: number): Promise<boolean> {
-	try {
-		const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
-			method: 'GET',
-			signal: AbortSignal.timeout(500)
-		})
-		return response.ok
-	} catch {
-		return false
-	}
-}
-
 // Kill processes on a specific port
 async function kill_port(port: number): Promise<boolean> {
 	return new Promise((resolve) => {
@@ -855,31 +846,65 @@ export async function dev_server(options: DevOptions) {
 		try {
 			server_config = await read_server_config(base_dir)
 			is_server_mode = true
-		} catch {
-			// No server config, check for site config
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
 		}
 
-		const port = server_config.port || parseInt(options.port, 10)
-
-		// Check if ports are in use
-		const main_in_use = await is_port_in_use(port)
-		const reload_in_use = await is_port_in_use(port + 1)
-
-		if (main_in_use || reload_in_use) {
-			if (options.force) {
-				spinner.text = 'Killing existing processes...'
-				if (main_in_use) await kill_port(port)
-				if (reload_in_use) await kill_port(port + 1)
-				// Give processes time to release ports
-				await new Promise(resolve => setTimeout(resolve, 500))
-			} else {
-				const ports_msg = main_in_use && reload_in_use
-					? `Ports ${port} and ${port + 1} are`
-					: `Port ${main_in_use ? port : port + 1} is`
-				spinner.fail(`${ports_msg} already in use. Use --force to kill existing processes.`)
-				process.exit(1)
+		const requested = requested_dev_port(options.port, server_config.port)
+		const previous_runtime = await read_dev_runtime(base_dir)
+		if (previous_runtime && runtime_has_live_process(previous_runtime) && !(options.force && requested.port === previous_runtime.port)) {
+			throw new Error(`This workspace already has a Primo server running or starting on port ${previous_runtime.port}. Stop it before starting another.`)
+		}
+		if (options.force) {
+			for (const candidate of [requested.port, requested.port + 1]) {
+				if (await is_port_in_use(candidate)) await kill_port(candidate)
 			}
+			await new Promise(resolve => setTimeout(resolve, 500))
 		}
+		const port = await select_dev_port({
+			...requested,
+			// Force means use the requested pair, not silently fall back if killing failed.
+			explicit: requested.explicit || !!options.force,
+			confirm: !options.force && process.stdin.isTTY && process.stdout.isTTY ? async next => {
+				spinner.stop()
+				try {
+					const { use_next } = await inquirer.prompt([{ type: 'confirm', name: 'use_next',
+						message: `Port ${requested.port} or reload port ${requested.port + 1} is in use. Use ${next} for this session?`, default: true }])
+					return use_next
+				} finally { spinner.start() }
+			} : undefined
+		})
+		if (port !== requested.port) {
+			spinner.info(`Port ${requested.port} or reload port ${requested.port + 1} is in use. Using http://localhost:${port} for this session.`)
+			spinner.start()
+		}
+		const runtime = await claim_dev_runtime(base_dir, port)
+		const stop_startup_on_interrupt = () => process.exit(130)
+		const stop_startup_on_terminate = () => process.exit(143)
+		process.once('SIGINT', stop_startup_on_interrupt)
+		process.once('SIGTERM', stop_startup_on_terminate)
+		let reload_handler: RequestListener | undefined
+		const reload_server = http.createServer((req, res) => {
+			if (req.method === 'GET' && req.url === '/__primo/runtime') {
+				const ready = reload_handler && cms_process?.exitCode === null && cms_process?.signalCode === null
+				res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' })
+				res.end(JSON.stringify(runtime))
+			} else if (reload_handler) {
+				reload_handler(req, res)
+			} else {
+				res.writeHead(503)
+				res.end('Primo is starting')
+			}
+		})
+		// Reserve reload before starting the CMS or importing any files. A bind
+		// race fails startup rather than leaving a partially working session.
+		await new Promise<void>((resolve, reject) => {
+			reload_server.once('error', reject)
+			reload_server.listen(port + 1, '127.0.0.1', () => {
+				reload_server.removeListener('error', reject)
+				resolve()
+			})
+		})
 
 		if (is_server_mode) {
 			// Auto-discover sites in subdirectories
@@ -923,6 +948,11 @@ export async function dev_server(options: DevOptions) {
 			env: { ...process.env, PRIMO_DEV_MODE: '1', PRIMO_AUTHOR_MODE: sync_policy.mode }
 		})
 
+		let cms_start_error: Error | null = null
+		cms_process.on('error', error => { cms_start_error = error })
+		process.once('exit', () => { cms_process?.kill('SIGTERM') })
+		if (cms_process.pid) await record_cms_process(base_dir, runtime, cms_process.pid)
+
 		// Capture stderr for errors
 		let stderr_output = ''
 		cms_process.stderr?.on('data', (data) => {
@@ -931,7 +961,7 @@ export async function dev_server(options: DevOptions) {
 
 		// Wait for CMS to be ready
 		const ready = await wait_for_ready(`http://127.0.0.1:${port}`, 30000)
-		if (!ready) {
+		if (!ready || cms_start_error || cms_process.exitCode !== null || cms_process.signalCode !== null) {
 			spinner.fail('CMS failed to start')
 			if (stderr_output) {
 				console.log(chalk.red(stderr_output))
@@ -1346,11 +1376,10 @@ export async function dev_server(options: DevOptions) {
 			setup_site_watchers(site)
 		}
 
-		// Simple HTTP server for reload requests (only in server mode)
-		if (is_server_mode) {
-			const http = await import('http')
-			const reload_server = http.createServer(async (req, res) => {
-				if (req.method !== 'POST' || req.url !== '/reload') {
+		// Enable reload once initial imports and watchers are ready.
+		{
+			reload_handler = async (req, res) => {
+				if (!is_server_mode || req.method !== 'POST' || req.url !== '/reload') {
 					res.writeHead(404)
 					res.end()
 					return
@@ -1439,13 +1468,7 @@ export async function dev_server(options: DevOptions) {
 				})
 				res.writeHead(200, { 'Content-Type': 'application/json' })
 				res.end(body)
-			})
-			reload_server.on('error', (err: NodeJS.ErrnoException) => {
-				if (err.code === 'EADDRINUSE') {
-					console.log(chalk.yellow(`\n  Warning: Reload server port ${port + 1} in use. Hot reload disabled.`))
-				}
-			})
-			reload_server.listen(port + 1, '127.0.0.1')
+			}
 		}
 
 		// Start polling for CMS changes (sync back to local files)
@@ -1533,6 +1556,8 @@ export async function dev_server(options: DevOptions) {
 			process.exit(0)
 		}
 
+		process.removeListener('SIGINT', stop_startup_on_interrupt)
+		process.removeListener('SIGTERM', stop_startup_on_terminate)
 		process.on('SIGINT', cleanup)
 		process.on('SIGTERM', cleanup)
 		process.on('uncaughtException', (err) => {

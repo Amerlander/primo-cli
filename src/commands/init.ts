@@ -69,7 +69,6 @@ export async function init_workspace(options: InitOptions) {
 		await fs.mkdir(path.join(base_dir, 'library'), { recursive: true })
 
 		await write_server_config(base_dir, {
-			port: 3000,
 			site_groups: [
 				{
 					id: 'default',
