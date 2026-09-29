@@ -1,3 +1,5 @@
+import { read_dev_runtime, runtime_has_live_process } from '../utils/dev-runtime.js'
+import { requested_dev_port } from '../utils/dev-port.js'
 import fs from 'fs/promises'
 import net from 'net'
 import path from 'path'
@@ -14,7 +16,7 @@ import { import_site_files, site_exists, wait_for_ready, kill_process, type Impo
 
 interface AddOptions {
 	dir: string
-	port: string
+	port?: string
 }
 
 const ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
@@ -66,7 +68,12 @@ export async function add_site(target: string, options: AddOptions) {
 	}
 
 	let server_config = await read_server_config(base_dir)
-	const port = server_config.port ?? parseInt(options.port, 10)
+	const runtime = await read_dev_runtime(base_dir)
+	if (runtime && runtime_has_live_process(runtime)) {
+		console.log(chalk.red(`A Primo server for this workspace is running or starting on port ${runtime.port}. Stop it before running primo add.`))
+		process.exit(1)
+	}
+	const { port } = requested_dev_port(options.port, server_config.port)
 
 	// `primo add` is the only thing that mints a site_id for a hand-authored
 	// folder: `primo dev` skips a site without one rather than adopting it (see

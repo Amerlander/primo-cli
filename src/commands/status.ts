@@ -1,3 +1,4 @@
+import { resolve_dev_server } from '../utils/dev-runtime.js'
 import fs from 'fs/promises'
 import path from 'path'
 import chalk from 'chalk'
@@ -52,9 +53,7 @@ export async function status(options: StatusOptions) {
 	}
 
 	const server_config = await read_server_config(base_dir)
-	const port = server_config.port ?? 3000
-	const api_url = `http://127.0.0.1:${port}`
-	const running = await is_server_running(port)
+	const { port, url: api_url, running } = await resolve_dev_server(base_dir, server_config.port)
 	const sites = await read_sites(base_dir)
 
 	// When the server is up, its dev-auth token unlocks the authoritative CMS
@@ -207,16 +206,5 @@ async function read_live_cms(api_url: string): Promise<{ sites: CmsSite[]; group
 		return { sites, groups }
 	} catch {
 		return null
-	}
-}
-
-async function is_server_running(port: number): Promise<boolean> {
-	try {
-		const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
-			signal: AbortSignal.timeout(1500)
-		})
-		return response.ok
-	} catch {
-		return false
 	}
 }

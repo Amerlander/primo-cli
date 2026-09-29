@@ -105,9 +105,5 @@ export const DEFAULT_PORT = 3000
 
 export async function write_server_config(base_dir: string, config: ServerConfig): Promise<void> {
 	const normalized = normalize_server_config(config)
-	// Drop port from the file when it's the default — it's noise otherwise.
-	const for_write = normalized.port === DEFAULT_PORT
-		? { ...normalized, port: undefined }
-		: normalized
-	await fs.writeFile(get_server_config_path(base_dir), dump_yaml(for_write, { lineWidth: -1, noRefs: true }))
+	await fs.writeFile(get_server_config_path(base_dir), dump_yaml(normalized, { lineWidth: -1, noRefs: true }))
 }

@@ -1,3 +1,4 @@
+import { resolve_dev_server } from '../utils/dev-runtime.js'
 import fs from 'fs/promises'
 import path from 'path'
 import chalk from 'chalk'
@@ -328,12 +329,7 @@ sections:
 
 		spinner.succeed(`Site created: ${chalk.cyan(site_dir)}`)
 
-		// Check if server is already running. Read the workspace's configured
-		// port (mirroring `primo dev`, which uses server_config.port) rather than
-		// assuming 3000 — otherwise on a custom-port workspace we'd probe the
-		// wrong port, miss the running server, and print links to a dead port.
-		const port = server_config.port ?? 3000
-		const server_running = await is_server_running(port)
+		const { port, running: server_running } = await resolve_dev_server(base_dir, server_config.port)
 
 		if (server_running) {
 			// A `primo dev` is already running. Ask it to reload and pick up the
@@ -411,7 +407,7 @@ sections:
 		} else if (!options.skipDev) {
 			// No server running, start one
 			console.log('')
-			await dev_server({ dir: base_dir, port: String(port) })
+			await dev_server({ dir: base_dir })
 		} else {
 			console.log('')
 			console.log(chalk.dim(`  ${display_name} was created on disk but isn't registered yet.`))
@@ -452,20 +448,6 @@ function generate_id(): string {
 		id += chars[Math.floor(Math.random() * chars.length)]
 	}
 	return id
-}
-
-async function is_server_running(port: number): Promise<boolean> {
-	try {
-		const controller = new AbortController()
-		const timeout = setTimeout(() => controller.abort(), 1000)
-		const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
-			signal: controller.signal
-		})
-		clearTimeout(timeout)
-		return response.ok
-	} catch {
-		return false
-	}
 }
 
 export function generate_agent_md(): string {
@@ -519,13 +501,26 @@ If a file appears to have lost content after a sync (deleted entries, shrunken Y
 
 ## Workflow
 
-- When building out a new site, call \`get_docs('recommended-defaults')\` first for baseline fields and the wiring checklist.
+The tool calls below need the Primo MCP server. Without it, follow the content design checklist below and read the site's source files directly.
+
+- Before creating a site or changing its content structure, call \`get_docs({section: 'recommended-defaults'})\` for field-scope decisions, block availability, page types, and the wiring checklist. Without MCP, use the content design checklist below.
 - After editing a block file, call \`validate_block\`.
 - After editing a page or page-type file, call \`validate_page\`.
 - When creating a new block or page type, prefer \`scaffold_block\` / \`scaffold_page_type\`.
-- When you create a reusable block, add its folder name to the relevant page type's \`allowed_blocks\` — otherwise it won't appear in the editor sidebar.
-- For everything else, call \`get_docs\` with the relevant section.
+- Add a block to a page type's \`allowed_blocks\` only when editors should be able to insert another instance into the page body.
+- For everything else, call \`get_docs\` with the relevant section, or read the relevant source files without MCP.
 - Block components are Svelte 5. If the Svelte MCP server is available, use \`mcp__svelte__svelte-autofixer\` after editing \`.svelte\` files.
+
+## Content design checklist
+
+These defaults apply even without MCP. Adapt them to the site's needs and the user's instructions; inspect existing structure before adding new fields, blocks, or types.
+
+- Site fields hold centrally managed values such as logo, navigation links, contact details, and social links. Reference them with \`site-field\` instead of copying values into sections.
+- Page fields describe a page: title, summary, cover image, author, and SEO metadata. Define them on the page type, populate each page's \`fields:\`, and reference them with \`page-field\` where needed.
+- Block fields hold section-specific content such as testimonials, feature lists, or CTA text. Existing section values live in the page's section \`content:\`; block \`content.yaml\` only supplies preview and insertion defaults.
+- Put shared Navigation/Footer in the page type's \`layout.yaml\` under \`header:\`/\`footer:\`. Put a once-per-page Hero in page \`sections:\` or seed it through layout \`body:\`; body seeds only affect newly created pages.
+- Block availability toggles (\`allowed_blocks\`) control the add-block picker. Normally leave Navigation, Footer, and once-per-page Hero off; enable sections editors should be able to add repeatedly. A hero-style section can be enabled if repetition is intentional. Excluding an individual block from the picker does not lock a section or enforce a one-instance limit, unless it was the last allowed block: an empty \`allowed_blocks\` list makes the type static and locks body structure.
+- Reuse page types unless field schema, shared layout, or editing needs differ. An empty \`allowed_blocks\` list makes the type static with locked body structure; a non-empty list supports flexible composition. Avoid a new type for every page or minor visual variation.
 
 ## Permission prompts
 

@@ -54,6 +54,10 @@ primo dev --author cms       # CMS edits write to files; file edits revert
 primo dev --author both      # Bidirectional sync (beta; CMS edits often lost on conflict)
 ```
 
+The port comes from `--port`, then `port:` in the workspace's `server.yaml`, then 3000. Primo also reserves the next port for reload. If the default pair is occupied, it automatically chooses the next available pair and prints the URL. If you explicitly set a port, Primo asks before using another pair for the session; noninteractive runs fail with instructions to pass another `--port`.
+
+The selected port is saved in `.primo/dev-server.json`, leaving `server.yaml` unchanged. Status, previews (CLI and MCP), new-site handling, and local pull discovery use this session record. A second dev server for the same workspace is refused to avoid opening its database twice. `--force` explicitly stops processes on the requested ports; automatic fallback never stops them.
+
 ### `primo push`
 
 Sync local changes to an existing hosted Primo server. Requires a server you've
