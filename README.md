@@ -79,6 +79,30 @@ Options:
 - `-t, --token <token>` - Auth token
 - `--preview` - Preview only
 - `--dry-run` - Show what would be pushed without sending requests
+- `--force` - Intentionally overwrite server changes after confirmation, with a backup
+- `--yes` - Confirm `--force` without an interactive prompt
+
+#### Protecting client edits
+
+Pull saves a revision for each site and the shared library in `.primo/sync-state.json`, scoped to the source server. A normal push stops if that server data changed since the last successful pull or push. An existing site without a baseline is also blocked. Update both the CMS and CLI to use this protocol; an older server cannot be bypassed with `--force`.
+
+From a workspace root, every included site and the library are checked before the first upload. Each import checks again before writing. If a client edits a later site during the push, earlier successful imports remain saved; the CLI stops and lists completed, failed, and unattempted targets. `--only <slug>` checks and pushes only that site.
+
+Save your local work before pulling after a conflict. Pull is **not a merge** and may replace local files. No automatic pull, retry, or content merge happens on a conflict.
+
+To intentionally replace server data with your local files:
+
+```bash
+primo push --force                 # Lists targets and asks for confirmation
+primo push --only my-site --force  # Overwrite one site
+primo push --force --yes           # Explicit confirmation for scripts
+```
+
+Before each overwrite, the server saves a ZIP export under `pb_data/push_backups/`. If backup creation fails, that import is rejected. The CLI prints an authenticated download URL and saves a copy under the target's `.primo/backups/` directory. Server backups are retained until an operator removes them. A new edit after preflight/confirmation still stops a forced push. The ZIP also includes original records in `.primo/backup-records.json` for operator-assisted recovery of properties the portable importer cannot yet round-trip.
+
+To recover content, extract the backup into a **separate directory**, set the intended `server` in its `site.yaml`, review it, then push that directory with `--force`. For a library backup, extract into a separate workspace and use `primo library push <server> --dir <workspace> --force`. Recovery creates another backup before overwriting. Push changes CMS data; publishing the website remains a separate action.
+
+`primo library push` supports the same `--force` and `--yes` options. Local `primo dev` watcher imports retain their author-mode behavior; explicit `primo push` requests are always checked.
 
 ### `primo pull`
 

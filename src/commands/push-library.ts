@@ -3,6 +3,7 @@ import path from 'path'
 import chalk from 'chalk'
 import ora from 'ora'
 import archiver from 'archiver'
+import { prepare_push, append_push_guard, finish_push } from '../utils/push-guard.js'
 import { get_auth_token } from '../utils/auth.js'
 import { normalize_server_url } from '../utils/server-config.js'
 
@@ -10,6 +11,8 @@ interface PushLibraryOptions {
 	server?: string
 	dir: string
 	token?: string
+	force?: boolean
+	yes?: boolean
 }
 
 function is_local_server(server: string): boolean {
@@ -50,12 +53,15 @@ export async function push_library(options: PushLibraryOptions) {
 			process.exit(1)
 		}
 
-		spinner.text = 'Packaging library...'
+		spinner.stop()
+		const [plan] = await prepare_push([{dir: workspace_dir, server, target: 'library', token, label: 'library'}], options)
+		spinner.start('Packaging library...')
 		const zip_buffer = await create_library_zip(workspace_dir)
 
 		spinner.text = 'Pushing library...'
 		const form_data = new FormData()
 		form_data.append('file', new Blob([zip_buffer]), 'library.zip')
+		append_push_guard(form_data, plan)
 
 		const headers: Record<string, string> = {}
 		if (token) {
@@ -80,10 +86,13 @@ export async function push_library(options: PushLibraryOptions) {
 		}
 
 		const result = await response.json() as {
+			revision?: string
+			backup?: string
 			success?: boolean
 			summary?: { groups: number; blocks: number }
 		}
 
+		await finish_push(plan, result)
 		spinner.succeed('Library push complete')
 		if (result.summary) {
 			console.log('')

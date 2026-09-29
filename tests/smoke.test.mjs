@@ -2,6 +2,7 @@ import { test, before, after, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'fs/promises'
 import path from 'path'
+import { save_baseline } from '../dist/utils/push-guard.js'
 import { start_mock_server } from './helpers/mock-server.mjs'
 import { run_cli, make_workspace, CLI_ENTRY } from './helpers/run-cli.mjs'
 
@@ -122,6 +123,7 @@ describe('primo push', () => {
 		await fs.mkdir(path.join(site_dir, 'pages'), { recursive: true })
 		await fs.writeFile(path.join(site_dir, 'site.yaml'), `name: Smoke Site\nsite_id: ${SITE.id}\nserver: ${server.url}\n`)
 		await fs.writeFile(path.join(site_dir, 'pages/index.yaml'), 'name: Home\nfields: {}\n')
+		await save_baseline(site_dir, server.url, SITE.id, server.revisions[SITE.id])
 		await fs.writeFile(path.join(workspace.work, 'server.yaml'), `server: ${server.url}\n`)
 
 		const result = await run_cli(['push', '--server', server.url, '--token', 'test-token'], {

@@ -4,10 +4,12 @@ import path from 'path'
 import chalk from 'chalk'
 import ora, { type Ora } from 'ora'
 import extract from 'extract-zip'
+import { save_baseline } from '../utils/push-guard.js'
+import { install_library_export } from '../utils/pull-library-export.js'
 import { dump as dump_yaml, load as load_yaml } from 'js-yaml'
 import { get_auth_token } from '../utils/auth.js'
 import { authenticate_interactively } from './login.js'
-import { write_site_config } from '../utils/site-config.js'
+import { read_site_config, write_site_config } from '../utils/site-config.js'
 import { read_server_config, write_server_config, normalize_server_url, type ServerConfig, type SiteGroupConfig } from '../utils/server-config.js'
 import { generate_agent_md } from './new.js'
 
@@ -280,6 +282,7 @@ async function pull_one_site(
 	const temp_zip = path.join(site_dir, '.primo-export.zip')
 	await fs.writeFile(temp_zip, Buffer.from(zip_data))
 
+	await save_baseline(site_dir, server, site.id, null)
 	spinner.text = `Extracting ${site.name}...`
 	const temp_dir = path.join(site_dir, '.primo', `pull-temp-${Date.now()}`)
 	let trashed: string[] = []
@@ -304,15 +307,17 @@ async function pull_one_site(
 		}
 	}
 
+	const exported_config = await read_site_config(site_dir).catch(() => null)
 	await write_site_config(site_dir, {
-		name: site.name || 'Imported Site',
+		name: exported_config?.name || site.name || 'Imported Site',
 		site_id: site.id,
 		server,
-		group: site.group
+		group: exported_config?.group ?? site.group
 	})
 
 	await copy_schemas(site_dir)
 	await add_schema_references(site_dir)
+	await save_baseline(site_dir, server, site.id, response.headers.get('x-primo-revision'))
 }
 
 // Move local files under MANAGED_DIRS that have no counterpart in the fresh
@@ -416,7 +421,7 @@ async function pull_library_into(
 	const zip_data = await response.arrayBuffer()
 	const temp_zip = path.join(root_dir, '.primo-library-export.zip')
 	await fs.writeFile(temp_zip, Buffer.from(zip_data))
-	await extract(temp_zip, { dir: root_dir })
+	await install_library_export(temp_zip, root_dir, server, response.headers.get('x-primo-revision'))
 	await fs.unlink(temp_zip)
 	return true
 }

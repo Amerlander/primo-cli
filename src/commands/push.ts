@@ -3,6 +3,7 @@ import path from 'path'
 import chalk from 'chalk'
 import ora, { type Ora } from 'ora'
 import archiver from 'archiver'
+import { prepare_push, append_push_guard, finish_push, response_error, type PushPlan, type PushTarget } from '../utils/push-guard.js'
 import { dump as dump_yaml, load as load_yaml } from 'js-yaml'
 import { get_auth_token } from '../utils/auth.js'
 import { read_site_config, get_site_config_path, type SiteConfig, SITE_CONFIG_FILE } from '../utils/site-config.js'
@@ -17,6 +18,8 @@ interface PushOptions {
 	token?: string
 	preview?: boolean
 	dryRun?: boolean
+	force?: boolean
+	yes?: boolean
 }
 
 async function path_exists(p: string): Promise<boolean> {
@@ -399,83 +402,75 @@ async function print_push_dry_run(root_dir: string, has_site_yaml: boolean, has_
 	console.log('')
 }
 
-// Pushes every site folder plus the library, continuing past individual
-// failures. Returns the labels that failed — the caller decides how loudly a
-// partial push should fail.
+async function site_target(site_dir: string, options: PushOptions): Promise<PushTarget> {
+	const config = await read_site_config(site_dir)
+	const server_raw = options.server || config.server
+	if (!server_raw) throw new Error(`Server URL required for ${path.basename(site_dir)}.`)
+	const server = normalize_server_url(server_raw)
+	const target = options.site || config.site_id
+	if (!target) throw new Error(`Site ID required for ${path.basename(site_dir)}.`)
+	return { dir: site_dir, server, target, token: options.token || await get_auth_token(server), label: path.basename(site_dir) }
+}
+
+// Preflight every target, including the library, before the first upload. Each
+// import rechecks its revision; a late conflict stops the remaining uploads.
 async function push_server(root_dir: string, options: PushOptions): Promise<string[]> {
-	// Sites live under sites/<slug>/
 	const sites_root = path.join(root_dir, 'sites')
 	const site_dirs: string[] = []
 	if (await path_exists(sites_root)) {
-		const entries = await fs.readdir(sites_root, { withFileTypes: true })
-		for (const entry of entries) {
+		for (const entry of await fs.readdir(sites_root, { withFileTypes: true })) {
 			if (!entry.isDirectory() || entry.name.startsWith('.')) continue
 			const candidate = path.join(sites_root, entry.name)
-			if (await path_exists(get_site_config_path(candidate))) {
-				site_dirs.push(candidate)
+			if (await path_exists(get_site_config_path(candidate))) site_dirs.push(candidate)
+		}
+	}
+	site_dirs.sort()
+	const selected = options.only ? site_dirs.filter(dir => path.basename(dir) === options.only) : site_dirs
+	if (!selected.length) {
+		console.error(options.only ? `No site folder named "${options.only}" under sites/.` : 'No site folders found in this server directory.')
+		return [options.only || 'sites']
+	}
+	let plans: PushPlan[]
+	try {
+		const targets = await Promise.all(selected.map(dir => site_target(dir, options)))
+		if (!options.only && await path_exists(path.join(root_dir, 'library'))) {
+			const server = options.server ? normalize_server_url(options.server) : targets[0].server
+			targets.push({ dir: root_dir, server, target: 'library', token: options.token || await get_auth_token(server), label: 'library' })
+		}
+		plans = await prepare_push(targets, options)
+	} catch (error) {
+		console.error(error instanceof Error ? error.message : error)
+		return selected.map(dir => path.basename(dir))
+	}
+	const completed: string[] = []
+	for (let index = 0; index < plans.length; index++) {
+		const plan = plans[index]
+		const spinner = ora(`Pushing ${plan.label}...`).start()
+		try {
+			if (plan.target === 'library') {
+				if (options.preview) { spinner.info('Library preview is not supported; no library upload sent.'); continue }
+				await push_library_dir(root_dir, options, spinner, plan)
+			} else {
+				await push_single_site(plan.dir, options, spinner, plan)
 			}
-		}
-	}
-
-	if (site_dirs.length === 0) {
-		console.log(chalk.yellow('  No site folders found in this server directory.'))
-		process.exit(1)
-	}
-
-	// --only <slug>: push just one site folder, skip the library
-	if (options.only) {
-		const match = site_dirs.find((d) => path.basename(d) === options.only)
-		if (!match) {
-			const available = site_dirs.map((d) => path.basename(d)).join(', ')
-			console.log(chalk.red(`  No site folder named "${options.only}" under sites/.`))
-			console.log(chalk.dim(`  Available: ${available}`))
-			process.exit(1)
-		}
-		const spinner = ora(`Pushing ${chalk.cyan(path.basename(match))}...`).start()
-		try {
-			await push_single_site(match, { ...options, dir: match }, spinner)
+			completed.push(plan.label)
 		} catch (error) {
-			spinner.fail(`${path.basename(match)}: ${error instanceof Error ? error.message : error}`)
+			spinner.fail(`${plan.label}: ${error instanceof Error ? error.message : error}`)
 			if (is_auth_error(error)) print_auth_hint()
-			process.exit(1)
-		}
-		return []
-	}
-
-	let saw_auth_error = false
-	const failed: string[] = []
-
-	// Push each site
-	for (const site_dir of site_dirs) {
-		const spinner = ora(`Pushing ${chalk.cyan(path.basename(site_dir))}...`).start()
-		try {
-			await push_single_site(site_dir, { ...options, dir: site_dir }, spinner)
-		} catch (error) {
-			spinner.fail(`${path.basename(site_dir)}: ${error instanceof Error ? error.message : error}`)
-			if (is_auth_error(error)) saw_auth_error = true
-			failed.push(path.basename(site_dir))
-			// Continue to remaining sites rather than abort the whole push
+			console.log(`Completed: ${completed.join(', ') || 'none'}`)
+			console.log(`Failed: ${plan.label}`)
+			console.log(`Not attempted: ${plans.slice(index + 1).map(p => p.label).join(', ') || 'none'}`)
+			console.log('Earlier successful imports remain saved. The failed request may need verification if its response was lost.')
+			return plans.slice(index).map(p => p.label)
 		}
 	}
-
-	// Push library if present
-	const library_dir = path.join(root_dir, 'library')
-	if (await path_exists(library_dir)) {
-		const spinner = ora('Pushing library...').start()
-		try {
-			await push_library_dir(root_dir, options, spinner)
-		} catch (error) {
-			spinner.fail(`library: ${error instanceof Error ? error.message : error}`)
-			if (is_auth_error(error)) saw_auth_error = true
-			failed.push('library')
-		}
-	}
-
-	if (saw_auth_error) print_auth_hint()
-	return failed
+	return []
 }
 
-async function push_single_site(site_dir: string, options: PushOptions, spinner: Ora) {
+async function push_single_site(site_dir: string, options: PushOptions, spinner: Ora, prepared?: PushPlan) {
+	spinner.stop()
+	const plan = prepared || (await prepare_push([await site_target(site_dir, options)], options))[0]
+	spinner.start()
 	let config: SiteConfig | null = null
 	try {
 		config = await read_site_config(site_dir)
@@ -483,18 +478,7 @@ async function push_single_site(site_dir: string, options: PushOptions, spinner:
 		// No config file, must provide options
 	}
 
-	const server_raw = options.server || config?.server
-	const server = server_raw ? normalize_server_url(server_raw) : undefined
-	const site_id = options.site || config?.site_id
-
-	if (!server) {
-		throw new Error(`Server URL required. Use --server or add server field to ${SITE_CONFIG_FILE}.`)
-	}
-	if (!site_id) {
-		throw new Error(`Site ID required. Use --site or add site_id field to ${SITE_CONFIG_FILE}.`)
-	}
-
-	const token = options.token || await get_auth_token(server)
+	const { server, token, target: site_id } = plan
 
 	spinner.text = 'Packaging files...'
 	const zip_buffer = await create_zip(site_dir)
@@ -505,12 +489,14 @@ async function push_single_site(site_dir: string, options: PushOptions, spinner:
 	// the server has zero sites), so it's the right path for first-time
 	// setup against a fresh deployment.
 	if (!token) {
+		if (plan.exists) throw new Error('Authentication required to update an existing site. Run `primo login` first.')
 		if (options.preview) {
 			throw new Error('Authentication required for --preview. Run `primo login` first.')
 		}
 		spinner.text = 'No auth token — attempting bootstrap...'
-		const bootstrap_result = await try_bootstrap_site(server, undefined, zip_buffer, config, site_id, group_name)
+		const bootstrap_result = await try_bootstrap_site(server, undefined, zip_buffer, config, site_id, group_name, plan)
 		if (bootstrap_result.ok) {
+			await finish_push(plan, bootstrap_result)
 			spinner.succeed(`Bootstrapped ${config?.name || path.basename(site_dir)}`)
 			console.log('')
 			console.log(chalk.dim('  Site created on server and content uploaded.'))
@@ -532,39 +518,20 @@ async function push_single_site(site_dir: string, options: PushOptions, spinner:
 	const form_data = new FormData()
 	form_data.append('file', new Blob([zip_buffer]), 'site.zip')
 	if (group_name) form_data.append('group_name', group_name)
+	append_push_guard(form_data, plan)
 
 	const response = await fetch(endpoint, {
 		method: 'POST',
-		headers: { 'Authorization': `Bearer ${token}` },
+		headers: token ? { 'Authorization': `Bearer ${token}` } : {},
 		body: form_data
 	})
 
-	// 404 from import means the site doesn't exist on the server yet. On a
-	// freshly-deployed server we can fall back to /api/primo/bootstrap,
-	// which creates the site and ingests the zip in one shot. Bootstrap is
-	// only available when the server has zero sites — past the first site,
-	// new sites must be created via the dashboard UI.
-	if (response.status === 404 && !options.preview) {
-		spinner.text = 'Site not found on server — bootstrapping...'
-		const bootstrap_result = await try_bootstrap_site(server, token, zip_buffer, config, site_id, group_name)
-		if (bootstrap_result.ok) {
-			spinner.succeed(`Bootstrapped ${config?.name || path.basename(site_dir)}`)
-			console.log('')
-			console.log(chalk.dim('  Site created on server and content uploaded.'))
-			console.log(chalk.dim('  Subsequent pushes will use the import endpoint.'))
-			// Converge local upload refs/filenames with the ids the server minted
-			// (see the import path below for why).
-			await apply_upload_writeback(site_dir, await root_dir_for(site_dir), bootstrap_result.created_ids)
-			return
-		}
-		throw new Error(bootstrap_result.error)
-	}
 
 	if (!response.ok) {
-		throw new Error(await response.text())
+		throw new Error(await response_error(response))
 	}
 
-	const result = await response.json() as { preview?: boolean; success?: boolean; diff: PushDiff; created_ids?: CreatedIDs }
+	const result = await response.json() as { preview?: boolean; success?: boolean; diff: PushDiff; created_ids?: CreatedIDs; revision?: string; backup?: string }
 	const label = config?.name || path.basename(site_dir)
 
 	if (options.preview) {
@@ -574,6 +541,7 @@ async function push_single_site(site_dir: string, options: PushOptions, spinner:
 		console.log('')
 		console.log(chalk.dim('  Run without --preview to apply these changes'))
 	} else {
+		await finish_push(plan, result)
 		spinner.succeed(`Pushed ${label}`)
 		console.log('')
 		print_diff(result.diff)
@@ -597,10 +565,12 @@ async function try_bootstrap_site(
 	zip_buffer: Buffer,
 	config: SiteConfig | null,
 	site_id: string,
-	group_name?: string
-): Promise<{ ok: true; created_ids?: CreatedIDs } | { ok: false; error: string }> {
+	group_name?: string,
+	plan?: PushPlan
+): Promise<{ ok: true; created_ids?: CreatedIDs; revision?: string } | { ok: false; error: string }> {
 	const form = new FormData()
 	form.append('site_id', site_id)
+	if (plan) append_push_guard(form, plan)
 	if (config?.name) form.append('name', config.name)
 	if (config?.group) form.append('group', config.group)
 	if (group_name) form.append('group_name', group_name)
@@ -622,8 +592,8 @@ async function try_bootstrap_site(
 	})
 
 	if (response.ok) {
-		const body = await response.json().catch(() => ({})) as { created_ids?: CreatedIDs }
-		return { ok: true, created_ids: body.created_ids }
+		const body = await response.json().catch(() => ({})) as { created_ids?: CreatedIDs; revision?: string }
+		return { ok: true, created_ids: body.created_ids, revision: body.revision }
 	}
 
 	if (response.status === 403) {
@@ -639,29 +609,8 @@ async function try_bootstrap_site(
 	return { ok: false, error: await response.text() }
 }
 
-async function push_library_dir(root_dir: string, options: PushOptions, spinner: Ora) {
-	// Resolve server: --server > any site.yaml's server (they all point at the same server)
-	let server = options.server ? normalize_server_url(options.server) : undefined
-	if (!server) {
-		const sites_root = path.join(root_dir, 'sites')
-		if (await path_exists(sites_root)) {
-			const entries = await fs.readdir(sites_root, { withFileTypes: true })
-			for (const entry of entries) {
-				if (!entry.isDirectory()) continue
-				try {
-					const config = await read_site_config(path.join(sites_root, entry.name))
-					if (config.server) {
-						server = config.server.replace(/\/+$/, '')
-						break
-					}
-				} catch {}
-			}
-		}
-	}
-	if (!server) throw new Error('Server URL required for library push.')
-
-	const token = options.token || await get_auth_token(server)
-	if (!token) throw new Error('Authentication required. Run `primo login` first.')
+async function push_library_dir(root_dir: string, options: PushOptions, spinner: Ora, plan: PushPlan) {
+	const { server, token } = plan
 
 	spinner.text = 'Packaging library...'
 	const archive = archiver('zip', { zlib: { level: 9 } })
@@ -677,22 +626,23 @@ async function push_library_dir(root_dir: string, options: PushOptions, spinner:
 	spinner.text = 'Pushing library...'
 	const form_data = new FormData()
 	form_data.append('file', new Blob([zip_buffer]), 'library.zip')
+	append_push_guard(form_data, plan)
 
 	const response = await fetch(`${server}/api/primo/import-library`, {
 		method: 'POST',
-		headers: { 'Authorization': `Bearer ${token}` },
+		headers: token ? { 'Authorization': `Bearer ${token}` } : {},
 		body: form_data
 	})
 
 	if (response.status === 404) {
-		spinner.warn('Library push not supported by this server — skipping')
-		return
+		throw new Error('Library push endpoint disappeared after preflight; no fallback attempted.')
 	}
 	if (!response.ok) {
-		throw new Error(await response.text())
+		throw new Error(await response_error(response))
 	}
 
-	const result = await response.json() as { summary?: { groups: number; blocks: number } }
+	const result = await response.json() as { summary?: { groups: number; blocks: number }; revision?: string; backup?: string }
+	await finish_push(plan, result)
 	spinner.succeed('Pushed library')
 	if (result.summary) {
 		console.log(chalk.dim(`    groups/ ${result.summary.groups}, blocks/ ${result.summary.blocks}`))

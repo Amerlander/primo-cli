@@ -3,7 +3,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import chalk from 'chalk'
 import ora from 'ora'
-import extract from 'extract-zip'
+import { install_library_export } from '../utils/pull-library-export.js'
 import { get_auth_token } from '../utils/auth.js'
 import { read_server_config, normalize_server_url } from '../utils/server-config.js'
 
@@ -84,7 +84,7 @@ export async function pull_library(options: PullLibraryOptions) {
 		await fs.writeFile(temp_zip, Buffer.from(zip_data))
 
 		spinner.text = 'Extracting library...'
-		await extract(temp_zip, { dir: output_dir })
+		await install_library_export(temp_zip, output_dir, server, response.headers.get('x-primo-revision'))
 		await fs.unlink(temp_zip)
 
 		const summary = await count_library(path.join(output_dir, 'library'))

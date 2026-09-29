@@ -10,8 +10,12 @@ import archiver from 'archiver'
  * 404'd against every real server; nothing in this repo would have noticed.
  * Recording requests here is what makes that class of break visible.
  */
-export async function start_mock_server({ sites = [], export_files = {}, site_groups = [] } = {}) {
+export async function start_mock_server({ sites = [], export_files = {}, site_groups = [], revisions = {}, on_request, unsupported_guard = false, legacy_export = false } = {}) {
 	const requests = []
+	const initial_revision = 'v1:' + 'a'.repeat(64)
+	for (const site of sites) revisions[site.id] ??= initial_revision
+	revisions.library ??= initial_revision
+	let sequence = 1
 
 	const server = http.createServer(async (req, res) => {
 		const url = new URL(req.url, 'http://127.0.0.1')
@@ -22,8 +26,20 @@ export async function start_mock_server({ sites = [], export_files = {}, site_gr
 			query: Object.fromEntries(url.searchParams),
 			authorization: req.headers.authorization ?? null,
 			content_type: req.headers['content-type'] ?? null,
-			body_length: body.length
+			body_length: body.length, body
 		})
+
+		if (on_request) await on_request({ req, url, body, revisions, requests })
+		const state_match = url.pathname.match(/^\/api\/primo\/push-state\/([^/]+)$/)
+		if (state_match && !unsupported_guard) {
+			const target = state_match[1]
+			return json(res, 200, { protocol: 1, exists: revisions[target] !== 'absent', revision: revisions[target] || 'absent' })
+		}
+		if (url.pathname.includes('/api/primo/push-backups/')) {
+			const zip = await make_zip(export_files)
+			res.writeHead(200, { 'Content-Type': 'application/zip' })
+			return res.end(zip)
+		}
 
 		if (url.pathname === '/api/health') {
 			return json(res, 200, { status: 'ok' })
@@ -55,24 +71,26 @@ export async function start_mock_server({ sites = [], export_files = {}, site_gr
 				return json(res, 404, { message: 'no such site' })
 			}
 			const zip = await make_zip(export_files)
-			res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': zip.length })
+			res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': zip.length, ...(!legacy_export ? {'X-Primo-Revision':revisions[site_id]} : {}) })
 			return res.end(zip)
 		}
 
 		if (url.pathname === '/api/primo/export-library' && req.method === 'GET') {
 			const zip = await make_zip({ 'blocks/.keep': '' })
-			res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': zip.length })
+			res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': zip.length, ...(!legacy_export ? {'X-Primo-Revision':revisions.library} : {}) })
 			return res.end(zip)
 		}
 
-		if (/^\/api\/primo\/import\/[^/]+$/.test(url.pathname) && req.method === 'POST') {
-			// `diff` is required, not optional: push pipes it straight into
-			// print_diff, which Object.entries() it. Omitting it fails with a
-			// bare "Cannot convert undefined or null to object".
+		const import_match = url.pathname.match(/^\/api\/primo\/import\/([^/]+)(\/preview)?$/)
+		if ((import_match || url.pathname === '/api/primo/import-library') && req.method === 'POST') {
+			const target = import_match ? import_match[1] : 'library'
+			const form = await new Response(body, {headers: {'Content-Type':req.headers['content-type']}}).formData()
+			if (!import_match?.[2] && form.get('expected_revision') !== revisions[target]) return json(res, 409, {message:'Server changed after preflight'})
+			if (!import_match?.[2]) revisions[target] = 'v1:' + (++sequence).toString(16).padStart(64, '0')
 			return json(res, 200, {
-				success: true,
-				diff: { pages: { added: [], modified: ['index'], deleted: [] } },
-				created_ids: {}
+				success: true, revision: revisions[target],
+				backup: form.get('force') === 'true' ? 'backup-1234.zip' : '',
+				diff: {pages:{added:[],modified:['index'],deleted:[]}}, summary:{groups:1,blocks:1}, created_ids:{}
 			})
 		}
 
@@ -85,6 +103,7 @@ export async function start_mock_server({ sites = [], export_files = {}, site_gr
 	return {
 		url: `http://127.0.0.1:${port}`,
 		requests,
+		revisions,
 		/** Every recorded request whose path matches, for order-independent assertions. */
 		matching: (pattern) => requests.filter((r) => (typeof pattern === 'string' ? r.path === pattern : pattern.test(r.path))),
 		close: () => new Promise((resolve) => server.close(resolve))

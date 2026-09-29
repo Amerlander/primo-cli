@@ -126,6 +126,8 @@ program
 	.option('--only <slug>', 'Push only the named site folder under sites/ (skips library)')
 	.option('-d, --dir <dir>', 'Directory', '.')
 	.option('-t, --token <token>', 'Auth token')
+	.option('--force', 'Overwrite server changes after confirmation, saving a backup first')
+	.option('--yes', 'Confirm --force without an interactive prompt')
 	.option('--preview', 'Preview only')
 	.option('--dry-run', 'Show what would be pushed without sending requests')
 	.addHelpText('after', `
@@ -168,6 +170,8 @@ library
 library
 	.command('push [server]')
 	.description('Push local shared library to hosted CMS')
+	.option('--force', 'Overwrite server library changes after confirmation, saving a backup first')
+	.option('--yes', 'Confirm --force without an interactive prompt')
 	.option('-s, --server <url>', 'Server URL')
 	.option('-d, --dir <dir>', 'Workspace directory', '.')
 	.option('-t, --token <token>', 'Auth token')
