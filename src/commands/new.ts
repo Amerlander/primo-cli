@@ -519,12 +519,14 @@ If a file appears to have lost content after a sync (deleted entries, shrunken Y
 
 ## Workflow
 
-- Before creating a site or changing its content structure, call \`get_docs({section: 'recommended-defaults'})\` for field-scope decisions, block availability, page types, and the wiring checklist.
+The tool calls below need the Primo MCP server. Without it, follow the content design checklist below and read the site's source files directly.
+
+- Before creating a site or changing its content structure, call \`get_docs({section: 'recommended-defaults'})\` for field-scope decisions, block availability, page types, and the wiring checklist. Without MCP, use the content design checklist below.
 - After editing a block file, call \`validate_block\`.
 - After editing a page or page-type file, call \`validate_page\`.
 - When creating a new block or page type, prefer \`scaffold_block\` / \`scaffold_page_type\`.
 - Add a block to a page type's \`allowed_blocks\` only when editors should be able to insert another instance into the page body.
-- For everything else, call \`get_docs\` with the relevant section.
+- For everything else, call \`get_docs\` with the relevant section, or read the relevant source files without MCP.
 - Block components are Svelte 5. If the Svelte MCP server is available, use \`mcp__svelte__svelte-autofixer\` after editing \`.svelte\` files.
 
 ## Content design checklist
@@ -535,7 +537,7 @@ These defaults apply even without MCP. Adapt them to the site's needs and the us
 - Page fields describe a page: title, summary, cover image, author, and SEO metadata. Define them on the page type, populate each page's \`fields:\`, and reference them with \`page-field\` where needed.
 - Block fields hold section-specific content such as testimonials, feature lists, or CTA text. Existing section values live in the page's section \`content:\`; block \`content.yaml\` only supplies preview and insertion defaults.
 - Put shared Navigation/Footer in the page type's \`layout.yaml\` under \`header:\`/\`footer:\`. Put a once-per-page Hero in page \`sections:\` or seed it through layout \`body:\`; body seeds only affect newly created pages.
-- Block availability toggles (\`allowed_blocks\`) control the add-block picker. Normally leave Navigation, Footer, and once-per-page Hero off; enable sections editors should be able to add repeatedly. A hero-style section can be enabled if repetition is intentional. Exclusion from the picker does not lock a section or enforce a one-instance limit.
+- Block availability toggles (\`allowed_blocks\`) control the add-block picker. Normally leave Navigation, Footer, and once-per-page Hero off; enable sections editors should be able to add repeatedly. A hero-style section can be enabled if repetition is intentional. Excluding an individual block from the picker does not, by itself, lock a section or enforce a one-instance limit.
 - Reuse page types unless field schema, shared layout, or editing needs differ. An empty \`allowed_blocks\` list makes the type static with locked body structure; a non-empty list supports flexible composition. Avoid a new type for every page or minor visual variation.
 
 ## Permission prompts
