@@ -91,3 +91,15 @@ describe('apply_server_group_id', () => {
 		}
 	})
 })
+
+test('write_server_config keeps one entry per group id and heals existing duplicates', async () => {
+	const { write_server_config, read_server_config } = await import('../dist/utils/server-config.js')
+	const dir = await (await import('node:fs/promises')).mkdtemp((await import('node:path')).join((await import('node:os')).tmpdir(), 'groups-'))
+	await write_server_config(dir, { site_groups: [
+		{ id: 'okwtvqfzrek51by', name: 'Default', index: 0 },
+		{ id: 'okwtvqfzrek51by', name: 'Default', index: 1 },
+		{ id: 'clientsgroup001', name: 'Clients', index: 2 }
+	] })
+	const { site_groups } = await read_server_config(dir)
+	assert.deepEqual(site_groups.map(g => [g.id, g.index]), [['okwtvqfzrek51by', 0], ['clientsgroup001', 1]])
+})
