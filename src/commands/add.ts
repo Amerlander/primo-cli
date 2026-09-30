@@ -138,7 +138,14 @@ export async function add_site(target: string, options: AddOptions) {
 	// dashboard doesn't invent an ad-hoc group id for it.
 	if (config.group === 'default') {
 		const site_groups = server_config.site_groups ?? []
-		if (!site_groups.some((group) => group.id === 'default')) {
+		// After the first import, server.yaml holds the server's id for the
+		// Default group rather than the `default` slug. Point this site at that
+		// group instead of adding a second "Default".
+		const existing_default = site_groups.find((group) => group.id !== 'default' && group.name.toLowerCase() === 'default')
+		if (existing_default) {
+			config.group = existing_default.id
+			await write_site_config(site_dir, config)
+		} else if (!site_groups.some((group) => group.id === 'default')) {
 			server_config = {
 				...server_config,
 				site_groups: [...site_groups, { id: 'default', name: 'Default', index: site_groups.length }]

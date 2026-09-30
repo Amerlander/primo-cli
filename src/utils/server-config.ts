@@ -103,7 +103,18 @@ export async function read_server_config(base_dir: string): Promise<ServerConfig
 
 export const DEFAULT_PORT = 3000
 
+// One entry per group id. Older paths could append a second copy of a group
+// (same server id, next index) when a site still referenced the local
+// `default` slug; drop repeats and close the index gaps they leave.
+function dedupe_site_groups(groups: SiteGroupConfig[] | undefined): SiteGroupConfig[] | undefined {
+	if (!groups) return groups
+	const seen = new Set<string>()
+	const unique = groups.filter(group => !seen.has(group.id) && !!seen.add(group.id))
+	if (unique.length === groups.length) return groups
+	return unique.map((group, index) => ({ ...group, index }))
+}
+
 export async function write_server_config(base_dir: string, config: ServerConfig): Promise<void> {
-	const normalized = normalize_server_config(config)
+	const normalized = normalize_server_config({ ...config, site_groups: dedupe_site_groups(config.site_groups) })
 	await fs.writeFile(get_server_config_path(base_dir), dump_yaml(normalized, { lineWidth: -1, noRefs: true }))
 }
