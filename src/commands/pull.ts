@@ -11,7 +11,7 @@ import { get_auth_token } from '../utils/auth.js'
 import { authenticate_interactively } from './login.js'
 import { read_site_config, write_site_config } from '../utils/site-config.js'
 import { read_server_config, write_server_config, normalize_server_url, type ServerConfig, type SiteGroupConfig } from '../utils/server-config.js'
-import { generate_agent_md } from './new.js'
+import { ensure_agent_files } from './new.js'
 
 interface PullOptions {
 	server?: string
@@ -235,12 +235,7 @@ export async function pull_site(options: PullOptions) {
 		// folders and need to know registration is `primo add`, not a side
 		// effect of `primo dev`. Never clobber an existing (possibly edited)
 		// one.
-		const agents_path = path.join(root_dir, 'AGENTS.md')
-		try {
-			await fs.access(agents_path)
-		} catch {
-			await fs.writeFile(agents_path, generate_agent_md())
-		}
+		await ensure_agent_files(root_dir)
 
 		spinner.succeed(`Server pulled to ${chalk.cyan(root_dir)}`)
 		console.log('')

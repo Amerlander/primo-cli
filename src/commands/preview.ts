@@ -48,6 +48,12 @@ export async function build_site_preview(site_dir_input: string, api_url_overrid
 	try {
 		config = (await read_site_config(site_dir)) as { site_id?: string; host?: string } | null
 	} catch {
+		// From the workspace root, say which --dir values would work.
+		const sites = await fs.readdir(path.join(site_dir, 'sites'), { withFileTypes: true })
+			.then(entries => entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).map(e => `sites/${e.name}`), () => [])
+		if (sites.length > 0) {
+			throw new Error(`This is the workspace root. Pass the site to preview, e.g. \`primo preview --dir ${sites[0]}\` (sites: ${sites.join(', ')}).`)
+		}
 		throw new Error(`No site.yaml found at ${site_dir}/site.yaml — run from a site directory, or pass --dir <site>.`)
 	}
 	const site_id = config?.site_id
