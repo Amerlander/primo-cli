@@ -5,6 +5,7 @@ import ora from 'ora'
 import inquirer from 'inquirer'
 import { SITE_CONFIG_FILE } from '../utils/site-config.js'
 import { SERVER_CONFIG_FILE, read_server_config, write_server_config } from '../utils/server-config.js'
+import { ensure_agent_files } from './new.js'
 import { detect_clients, get_client, path_context } from '../utils/mcp-clients.js'
 import { run_mcp_wiring, type ClientResult } from '../utils/mcp-wiring.js'
 
@@ -90,6 +91,7 @@ export async function init_workspace(options: InitOptions) {
 			await write_server_config(base_dir, { ...server_config, site_groups })
 		}
 
+		await ensure_agent_files(base_dir)
 		spinner.succeed(`Workspace initialized: ${chalk.cyan(base_dir)}`)
 
 		await wire_mcp_on_init({ base_dir, skip: options.mcp === false, yes: !!options.yes })
