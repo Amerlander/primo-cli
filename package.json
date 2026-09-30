@@ -1,6 +1,6 @@
 {
   "name": "primo-cli",
-  "version": "0.1.28",
+  "version": "0.2.0",
   "description": "Local development CLI for Primo",
   "type": "module",
   "bin": {
