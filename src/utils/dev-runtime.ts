@@ -25,6 +25,46 @@ export function runtime_has_live_process(runtime: DevRuntime): boolean {
 	return process_is_alive(runtime.pid) || (runtime.cms_pid !== undefined && process_is_alive(runtime.cms_pid))
 }
 
+// The CLI was killed without running its exit cleanup (e.g. SIGKILL from a
+// tool timeout) but the CMS child it started is still serving.
+export function runtime_is_orphaned(runtime: DevRuntime): boolean {
+	return !process_is_alive(runtime.pid) && runtime.cms_pid !== undefined && process_is_alive(runtime.cms_pid)
+}
+
+export function describe_live_runtime(runtime: DevRuntime): string {
+	if (runtime_is_orphaned(runtime)) {
+		return `A Primo CMS from an earlier session is still running on port ${runtime.port} (pid ${runtime.cms_pid}); `
+			+ `the command that started it exited without stopping it. Stop it with \`kill ${runtime.cms_pid}\`, `
+			+ 'or run `primo dev --force` to stop it and start fresh.'
+	}
+	return `This workspace already has a Primo server running or starting on port ${runtime.port} (pid ${runtime.pid}). Stop it before starting another.`
+}
+
+// Stop whatever a previous session left running, for `primo dev --force`.
+export async function stop_runtime_processes(runtime: DevRuntime): Promise<void> {
+	for (const pid of [runtime.cms_pid, runtime.pid]) {
+		if (pid === undefined || pid === process.pid || !process_is_alive(pid)) continue
+		try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+	}
+	const wait = async (attempts: number) => {
+		for (let attempt = 0; attempt < attempts && runtime_has_live_process(runtime); attempt++) {
+			await new Promise(resolve => setTimeout(resolve, 100))
+		}
+	}
+	await wait(20)
+	if (!runtime_has_live_process(runtime)) return
+	// Didn't stop on SIGTERM within 2s: force it, and fail loudly if even that
+	// doesn't work rather than letting startup trip over it.
+	for (const pid of [runtime.cms_pid, runtime.pid]) {
+		if (pid === undefined || pid === process.pid || !process_is_alive(pid)) continue
+		try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+	}
+	await wait(20)
+	if (runtime_has_live_process(runtime)) {
+		throw new Error(`Could not stop the previous Primo session (pid ${[runtime.cms_pid, runtime.pid].filter(Boolean).join(', ')}). Stop it manually and try again.`)
+	}
+}
+
 export async function read_dev_runtime(dir: string): Promise<DevRuntime | null> {
 	try {
 		const value = JSON.parse(await fs.readFile(path.join(dir, RUNTIME_FILE), 'utf8'))
@@ -52,7 +92,7 @@ export async function claim_dev_runtime(dir: string, port: number): Promise<DevR
 	await fs.mkdir(path.dirname(file), { recursive: true })
 	const previous = await read_dev_runtime(dir)
 	if (previous && runtime_has_live_process(previous)) {
-		throw new Error(`This workspace already has a Primo server running or starting on port ${previous.port}. Stop it before starting another.`)
+		throw new Error(describe_live_runtime(previous))
 	}
 	if (previous) await fs.unlink(file).catch(() => {})
 	const runtime: DevRuntime = { version: 1, workspace: await fs.realpath(dir), pid: process.pid, port, instance: randomUUID() }

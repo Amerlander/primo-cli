@@ -6,6 +6,7 @@ import archiver from 'archiver'
 import { prepare_push, append_push_guard, finish_push, response_error, type PushPlan, type PushTarget } from '../utils/push-guard.js'
 import { dump as dump_yaml, load as load_yaml } from 'js-yaml'
 import { get_auth_token } from '../utils/auth.js'
+import { find_duplicate_site_ids, describe_duplicate_site_ids } from '../utils/site-ids.js'
 import { read_site_config, get_site_config_path, type SiteConfig, SITE_CONFIG_FILE } from '../utils/site-config.js'
 import { get_server_config_path, read_server_config, resolve_format_options, normalize_server_url, type ServerConfig, type SiteGroupConfig } from '../utils/server-config.js'
 import { format_file_contents } from '../utils/format.js'
@@ -301,7 +302,23 @@ export async function push_site(options: PushOptions): Promise<string[]> {
 		return failed
 	}
 
-	// Single-site mode (cwd is a site folder, or --dir points at one)
+	// Single-site mode (cwd is a site folder, or --dir points at one). If it
+	// sits under a workspace's sites/, a sibling with the same site_id means
+	// one of them is a copy that would overwrite the other on the server.
+	const parent = path.dirname(root_dir)
+	if (path.basename(parent) === 'sites') {
+		const siblings = (await fs.readdir(parent, { withFileTypes: true }))
+			.filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+			.map(entry => path.join(parent, entry.name))
+		const duplicates = await find_duplicate_site_ids(siblings)
+		const mine = [...duplicates].filter(([, dirs]) => dirs.includes(root_dir))
+		if (mine.length > 0) {
+			console.error(describe_duplicate_site_ids(new Map(mine), path.dirname(parent)))
+			process.exitCode = 1
+			return [path.basename(root_dir)]
+		}
+	}
+
 	const spinner = ora('Reading local files...').start()
 	try {
 		await push_single_site(root_dir, effective_options, spinner)
@@ -425,6 +442,11 @@ async function push_server(root_dir: string, options: PushOptions): Promise<stri
 		}
 	}
 	site_dirs.sort()
+	const duplicate_ids = await find_duplicate_site_ids(site_dirs)
+	if (duplicate_ids.size > 0) {
+		console.error(describe_duplicate_site_ids(duplicate_ids, root_dir))
+		return [...duplicate_ids.values()].flat().map(dir => path.basename(dir))
+	}
 	const selected = options.only ? site_dirs.filter(dir => path.basename(dir) === options.only) : site_dirs
 	if (!selected.length) {
 		console.error(options.only ? `No site folder named "${options.only}" under sites/.` : 'No site folders found in this server directory.')

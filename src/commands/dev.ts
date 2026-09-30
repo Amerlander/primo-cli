@@ -6,7 +6,7 @@ import ora from 'ora'
 import inquirer from 'inquirer'
 import http, { type RequestListener } from 'http'
 import { requested_dev_port, select_dev_port, is_port_in_use } from '../utils/dev-port.js'
-import { claim_dev_runtime, read_dev_runtime, runtime_has_live_process, record_cms_process } from '../utils/dev-runtime.js'
+import { claim_dev_runtime, read_dev_runtime, runtime_has_live_process, record_cms_process, describe_live_runtime, stop_runtime_processes } from '../utils/dev-runtime.js'
 import { spawn, execFileSync, type ChildProcess } from 'child_process'
 import archiver from 'archiver'
 import extract from 'extract-zip'
@@ -852,8 +852,11 @@ export async function dev_server(options: DevOptions) {
 
 		const requested = requested_dev_port(options.port, server_config.port)
 		const previous_runtime = await read_dev_runtime(base_dir)
-		if (previous_runtime && runtime_has_live_process(previous_runtime) && !(options.force && requested.port === previous_runtime.port)) {
-			throw new Error(`This workspace already has a Primo server running or starting on port ${previous_runtime.port}. Stop it before starting another.`)
+		if (previous_runtime && runtime_has_live_process(previous_runtime)) {
+			if (!options.force) throw new Error(describe_live_runtime(previous_runtime))
+			// --force stops this workspace's previous session wherever it is,
+			// including a CMS orphaned by a killed CLI on another port.
+			await stop_runtime_processes(previous_runtime)
 		}
 		if (options.force) {
 			for (const candidate of [requested.port, requested.port + 1]) {
@@ -1037,6 +1040,8 @@ export async function dev_server(options: DevOptions) {
 			if (blocked_sites.has(site.dir)) continue
 			await verify_site_ready(api_url, site.config.site_id)
 		}
+
+		await repoint_local_hosts(`http://127.0.0.1:${port}`, port)
 
 		spinner.succeed('Primo running')
 
@@ -1390,6 +1395,14 @@ export async function dev_server(options: DevOptions) {
 				const quarantined: string[] = []
 				for (const site of new_sites) {
 					if (known_sites.has(site.dir)) continue
+					// Discovery may pick a newly copied folder over an active site
+					// that shares its site_id. The active one wins; never import a
+					// second folder into a site that's already being synced.
+					const active = sites.find(existing => existing.config.site_id === site.config.site_id)
+					if (active) {
+						warn_once(site.dir, `  ⚠ ${path.relative(base_dir, site.dir)} has the same site_id as ${path.relative(base_dir, active.dir)}, which is already running, and was skipped. Keep backups outside sites/.`)
+						continue
+					}
 
 					known_sites.add(site.dir)
 					sites.push(site)
@@ -1656,7 +1669,10 @@ function warn_once(site_dir: string, message: string): void {
 async function discover_sites(base_dir: string): Promise<SiteInfo[]> {
 	const sites: SiteInfo[] = []
 	const sites_root = await get_sites_root(base_dir)
-	const entries = await fs.readdir(sites_root, { withFileTypes: true })
+	// Shortest name first, so on a site_id clash the original is kept over a
+	// backup copy (`coffee` vs `coffee.bak`, `demo` vs `aaa-demo-backup`)
+	const entries = (await fs.readdir(sites_root, { withFileTypes: true }))
+		.sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name))
 
 	for (const entry of entries) {
 		if (entry.isDirectory() && !entry.name.startsWith('.')) {
@@ -1668,6 +1684,13 @@ async function discover_sites(base_dir: string): Promise<SiteInfo[]> {
 					// would post site_id=undefined and die with a buried
 					// error, so skip it and say what to run instead.
 					warn_once(site_dir, `  ⚠ sites/${entry.name} isn't registered — run \`primo add ${entry.name}\` to import it.`)
+					continue
+				}
+				const twin = sites.find(site => site.config.site_id === config.site_id)
+				if (twin) {
+					// A copy (usually a backup) of another site: importing both
+					// would have them overwrite each other. Keep the first.
+					warn_once(site_dir, `  ⚠ sites/${entry.name} has the same site_id as ${path.relative(sites_root, twin.dir)} and was skipped. Keep backups outside sites/ (e.g. _backups/), or remove its site_id and run \`primo add ${entry.name}\` to make it a new site.`)
 					continue
 				}
 				sites.push({ dir: site_dir, config })
@@ -1833,6 +1856,36 @@ async function verify_site_ready(api_url: string, site_id: string): Promise<bool
 const dev_token_cache = new Map<string, string>()
 
 /** Fetch a local dev token; null when the server doesn't offer one. */
+// Local sites route via `<slug>.localhost:<port>`, and that host is stored on
+// the site when it's first registered. A later session on another port (the
+// default is taken, `--port`, or a headless `primo add`) would leave those
+// sites unreachable: preview and editor links 404 because the stored host no
+// longer matches. Re-point them to this session's port (previews are built
+// under the current host by build_preview / `primo preview`). Only rewrites
+// hosts of exactly that local shape.
+async function repoint_local_hosts(api_url: string, port: number): Promise<void> {
+	const token = await dev_auth_token(api_url)
+	if (!token) return
+	let sites: Array<{ id: string; host: string }> = []
+	try {
+		const response = await fetch_with_timeout(`${api_url}/api/collections/sites/records?perPage=500&fields=id,host`, { headers: { Authorization: token } }, 5000)
+		if (!response.ok) return
+		sites = ((await response.json()) as { items?: Array<{ id: string; host: string }> }).items ?? []
+	} catch { return }
+	for (const site of sites) {
+		const match = /^([a-z0-9-]+)\.localhost:(\d+)$/.exec(site.host ?? '')
+		if (!match || Number(match[2]) === port) continue
+		const host = `${match[1]}.localhost:${port}`
+		try {
+			await fetch_with_timeout(`${api_url}/api/collections/sites/records/${site.id}`, {
+				method: 'PATCH',
+				headers: { Authorization: token, 'Content-Type': 'application/json' },
+				body: JSON.stringify({ host })
+			}, 5000)
+		} catch { /* best effort: the printed links just won't resolve for this site */ }
+	}
+}
+
 async function dev_auth_token(api_url: string): Promise<string | null> {
 	const cached = dev_token_cache.get(api_url)
 	if (cached) return cached

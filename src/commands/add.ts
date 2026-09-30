@@ -1,4 +1,4 @@
-import { read_dev_runtime, runtime_has_live_process } from '../utils/dev-runtime.js'
+import { read_dev_runtime, runtime_has_live_process, runtime_is_orphaned, describe_live_runtime } from '../utils/dev-runtime.js'
 import { requested_dev_port } from '../utils/dev-port.js'
 import fs from 'fs/promises'
 import net from 'net'
@@ -12,6 +12,7 @@ import { read_site_config, write_site_config, type SiteConfig } from '../utils/s
 import { derive_display_name } from '../utils/site-name.js'
 import { SERVER_CONFIG_FILE, read_server_config, write_server_config, type ServerConfig } from '../utils/server-config.js'
 import { normalize_site } from './validate.js'
+import { find_copied_entity_ids, strip_entity_ids } from '../utils/site-ids.js'
 import { import_site_files, site_exists, wait_for_ready, kill_process, type ImportTimings } from './dev.js'
 
 interface AddOptions {
@@ -70,7 +71,14 @@ export async function add_site(target: string, options: AddOptions) {
 	let server_config = await read_server_config(base_dir)
 	const runtime = await read_dev_runtime(base_dir)
 	if (runtime && runtime_has_live_process(runtime)) {
-		console.log(chalk.red(`A Primo server for this workspace is running or starting on port ${runtime.port}. Stop it before running primo add.`))
+		if (runtime_is_orphaned(runtime)) {
+			console.log(chalk.red(describe_live_runtime(runtime)))
+		} else {
+			// `add` imports through its own short-lived CMS, so it can't share the
+			// workspace with a running `primo dev`. Spell out both ways through.
+			console.log(chalk.red(`\`primo dev\` is running for this workspace (port ${runtime.port}), so \`primo add\` can't start its own CMS.`))
+			console.log(chalk.dim(`  Stop it (Ctrl+C in its terminal), run \`primo add ${target}\`, then start \`primo dev\` again.`))
+		}
 		process.exit(1)
 	}
 	const { port } = requested_dev_port(options.port, server_config.port)
@@ -92,13 +100,30 @@ export async function add_site(target: string, options: AddOptions) {
 	if (await is_port_occupied(port)) {
 		if (await is_server_running(port)) {
 			console.log(chalk.red(`A Primo server is running on port ${port}.`))
-			console.log(chalk.dim(`  Stop it (Ctrl+C in its terminal), then re-run \`primo add ${target}\`.`))
-			console.log(chalk.dim('  `primo dev` imports the folder itself once it\'s restarted.'))
+			console.log(chalk.dim(`  Stop it (Ctrl+C in its terminal), run \`primo add ${target}\`, then start \`primo dev\` again.`))
 		} else {
 			console.log(chalk.red(`Port ${port} is in use, so \`primo add\` can't start a CMS to import into.`))
 			console.log(chalk.dim(`  Free the port (stop whatever is on it), then re-run \`primo add ${target}\`.`))
 		}
 		process.exit(1)
+	}
+
+	// A folder started by copying another site carries that site's record ids,
+	// and ids are global, so the import would fail with a bare "id: Value must
+	// be unique". Only for a folder being registered for the first time.
+	const registered = await read_site_config(site_dir).then(c => !!c.site_id).catch(() => false)
+	if (!registered) {
+		const others = (await fs.readdir(sites_root, { withFileTypes: true }))
+			.filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && path.join(sites_root, entry.name) !== site_dir)
+			.map(entry => path.join(sites_root, entry.name))
+		const copied = await find_copied_entity_ids(site_dir, others)
+		if (copied.length > 0) {
+			// Started by copying another site: give it its own ids rather than
+			// failing the import on the first clash.
+			const sources = [...new Set(copied.map(c => `sites/${path.basename(c.source)}`))].join(', ')
+			const removed = await strip_entity_ids(site_dir)
+			console.log(chalk.dim(`  removed ${removed} record id${removed === 1 ? '' : 's'} copied from ${sources}; new ones will be assigned`))
+		}
 	}
 
 	const { config, created, minted } = await ensure_site_config(site_dir, folder_name)

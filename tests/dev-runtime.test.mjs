@@ -5,7 +5,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { read_dev_runtime, resolve_dev_server, runtime_is_running } from '../dist/utils/dev-runtime.js'
+import { read_dev_runtime, resolve_dev_server, runtime_is_running, stop_runtime_processes } from '../dist/utils/dev-runtime.js'
 import { select_dev_port } from '../dist/utils/dev-port.js'
 import { CLI_ENTRY, make_workspace, run_cli } from './helpers/run-cli.mjs'
 
@@ -71,7 +71,26 @@ test('duplicate workspace dev and add refuse a live session before changing site
  assert.match(result.output, /already has a Primo server/)
  const add = await run_cli(['add', 'demo', '--port', String(runtime.port + 2)], options)
  assert.notEqual(add.code, 0)
- assert.match(add.output, /running or starting/)
+ assert.match(add.output, /is running for this workspace/)
+})
+
+test('an orphaned CMS from a killed CLI is named, and --force can stop it', async t => {
+ const { workspace, file } = await fixture(t)
+ // A CLI that is gone (its pid exited) with a CMS child still serving.
+ const gone = spawn(process.execPath, ['-e', ''])
+ await once(gone, 'exit')
+ const cms = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+ t.after(() => { if (cms.exitCode === null && cms.signalCode === null) cms.kill('SIGKILL') })
+ const runtime = JSON.parse(await fs.readFile(file, 'utf8'))
+ Object.assign(runtime, { pid: gone.pid, cms_pid: cms.pid })
+ await fs.writeFile(file, JSON.stringify(runtime))
+ const result = await run_cli(['dev', '--port', String(runtime.port + 2)], { cwd: workspace.work, home: workspace.home })
+ assert.notEqual(result.code, 0)
+ assert.match(result.output, /earlier session/)
+ assert.match(result.output, new RegExp(`kill ${cms.pid}`))
+ assert.match(result.output, /--force/)
+ await stop_runtime_processes(runtime)
+ assert.notEqual(cms.signalCode ?? (await once(cms, 'exit'))[1], null)
 })
 
 async function start_dev(t, workspace, args = []) {
