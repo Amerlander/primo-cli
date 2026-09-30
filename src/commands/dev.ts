@@ -927,7 +927,19 @@ export async function dev_server(options: DevOptions) {
 				}
 				sites = [{ dir: base_dir, config }]
 			} catch {
-				spinner.fail(`No ${SERVER_CONFIG_FILE} or ${SITE_CONFIG_FILE} found. Run \`primo new\` first.`)
+				// Common slip: running from the folder that *contains* the
+				// workspace (right after `primo init <name>`). Point at it.
+				const children = await fs.readdir(base_dir, { withFileTypes: true }).catch(() => [])
+				const workspaces: string[] = []
+				for (const entry of children) {
+					if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+					if (await fs.access(path.join(base_dir, entry.name, SERVER_CONFIG_FILE)).then(() => true, () => false)) workspaces.push(entry.name)
+				}
+				if (workspaces.length > 0) {
+					spinner.fail(`No ${SERVER_CONFIG_FILE} here. Run \`primo dev\` from inside your workspace: \`cd ${workspaces[0]}\`${workspaces.length > 1 ? ` (found: ${workspaces.join(', ')})` : ''}`)
+				} else {
+					spinner.fail(`No ${SERVER_CONFIG_FILE} or ${SITE_CONFIG_FILE} found. Run \`primo init\` to create a workspace, then \`primo new\` inside it.`)
+				}
 				process.exit(1)
 			}
 		}

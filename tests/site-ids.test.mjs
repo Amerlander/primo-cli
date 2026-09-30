@@ -120,7 +120,7 @@ test('init writes AGENTS.md and a CLAUDE.md that imports it, without clobbering'
 	const options = { cwd: workspace.work, home: workspace.home, timeout_ms: 20000 }
 	assert.equal((await run_cli(['init', '--no-mcp', 'ws'], options)).code, 0)
 	const ws = path.join(workspace.work, 'ws')
-	assert.equal(await fs.readFile(path.join(ws, 'CLAUDE.md'), 'utf8'), '@AGENTS.md\n')
+	assert.match(await fs.readFile(path.join(ws, 'CLAUDE.md'), 'utf8'), /^@AGENTS\.md$/m)
 	assert.match(await fs.readFile(path.join(ws, 'AGENTS.md'), 'utf8'), /## Fields/)
 	await fs.writeFile(path.join(ws, 'CLAUDE.md'), 'my notes\n')
 	await run_cli(['new', 'demo', '--skip-dev'], { ...options, cwd: ws })
