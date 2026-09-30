@@ -2,6 +2,7 @@ import { resolve_dev_server } from '../utils/dev-runtime.js'
 import fs from 'fs/promises'
 import path from 'path'
 import chalk from 'chalk'
+import { VALID_FIELD_TYPES } from './validate.js'
 import ora from 'ora'
 import inquirer from 'inquirer'
 import { dev_server } from './dev.js'
@@ -404,10 +405,20 @@ sections:
 				console.log(chalk.dim('  Restart `primo dev` to pick up the new site, or stop it and run `primo add <name>`.'))
 				console.log('')
 			}
-		} else if (!options.skipDev) {
-			// No server running, start one
+		} else if (!options.skipDev && process.stdin.isTTY && process.stdout.isTTY) {
+			// No server running, start one. It runs in the foreground until
+			// Ctrl+C, so say so up front.
 			console.log('')
+			console.log(chalk.dim('  Starting the local CMS (runs until you press Ctrl+C; pass --skip-dev to only create files)...'))
 			await dev_server({ dir: base_dir })
+		} else if (!options.skipDev) {
+			// Not an interactive terminal (an agent, script, or CI): starting a
+			// server that never returns would hang the caller, so create the
+			// files and say how to start it.
+			console.log('')
+			console.log(`  ${display_name} was created. Start the local CMS to import it:`)
+			console.log(chalk.dim('    primo dev    (runs until stopped; run it in the background from scripts)'))
+			console.log('')
 		} else {
 			console.log('')
 			console.log(chalk.dim(`  ${display_name} was created on disk but isn't registered yet.`))
@@ -467,8 +478,8 @@ Without the MCP server, read \`sites/*/blocks/*/fields.yaml\` and \`sites/*/page
 
 ## Setup
 
-- \`primo dev\` — start the local CMS and dev server. Run from the workspace root.
-- \`primo new [name]\` — scaffold a new site under \`sites/\`.
+- \`primo dev\` — start the local CMS and dev server. Run from the workspace root. It runs until stopped; from scripts or agents, run it in the background and stop it by PID.
+- \`primo new [name]\` — scaffold a new site under \`sites/\`. In an interactive terminal it then starts the CMS; add \`--skip-dev\` to only create files.
 - \`primo add <name>\` — register an existing \`sites/<name>\` folder with the CMS (mints its site_id and imports its records). Creating the folder alone doesn't register it.
 - File edits sync automatically while \`primo dev\` is running. Structural changes (block schema, component) may trigger a browser reload.
 
@@ -498,6 +509,15 @@ If a file appears to have lost content after a sync (deleted entries, shrunken Y
 - Page slugs come from the file path under \`pages/\`, not a \`slug:\` key.
 - \`pages/index.yaml\` → \`/\`, \`pages/about.yaml\` → \`/about\`, \`pages/about/team.yaml\` → \`/about/team\`.
 - Do not add \`slug:\` to page files. It is ignored.
+
+## Fields
+
+- Field types: ${VALID_FIELD_TYPES.map(type => `\`${type}\``).join(', ')}. Anything else fails validation.
+- Nested fields of a \`repeater\` or \`group\` go under \`subfields:\` (not \`fields:\`).
+- \`site-field\` references a site field by name: \`config: { field: <site-field-name> }\`.
+- \`page-field\` references a page type field as \`<page-type-folder>--<field-key>\`, e.g. \`config: { field: blog-post--author }\`.
+- \`url\` holds a plain string (\`/about\`, \`https://...\`). \`link\` holds \`{ label, url }\`; a \`url\` that matches a page path is stored as a reference to that page.
+- Run \`primo validate\` (from the workspace root it checks every site) before assuming a schema change landed.
 
 ## Workflow
 

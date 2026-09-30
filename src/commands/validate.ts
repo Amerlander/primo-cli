@@ -17,7 +17,7 @@ interface ValidateOptions {
 	strict?: boolean
 }
 
-const VALID_FIELD_TYPES = [
+export const VALID_FIELD_TYPES = [
 	'text',
 	'rich-text',
 	'markdown',
@@ -259,6 +259,24 @@ function validate_field_recursive(
 		errors.push(...validate_select_field(field, display_name, file_path))
 	}
 
+	// Nested fields go under `subfields:`. A repeater/group written with
+	// `fields:` imports as having no children and all its content is dropped.
+	if ((field.type === 'repeater' || field.type === 'group') && field.fields !== undefined && field.subfields === undefined) {
+		errors.push({
+			file: file_path,
+			field: display_name,
+			message: `Nested fields of a ${field.type} go under "subfields:", not "fields:" — as written, it has no subfields and its content would be dropped`,
+			severity: 'error'
+		})
+	} else if ((field.type === 'repeater' || field.type === 'group') && (!Array.isArray(field.subfields) || field.subfields.length === 0)) {
+		errors.push({
+			file: file_path,
+			field: display_name,
+			message: `A ${field.type} needs at least one entry under "subfields:"`,
+			severity: 'warning'
+		})
+	}
+
 	if (field.parent && !field_names.has(field.parent)) {
 		errors.push({
 			file: file_path,
@@ -280,11 +298,37 @@ function validate_field_recursive(
 
 
 export async function validate_site(options: ValidateOptions) {
+	const dir = path.resolve(options.dir)
+	// From a workspace root (server.yaml + sites/), validate every site instead
+	// of failing on the root's missing pages/index.yaml.
+	const is_workspace = await fs.access(path.join(dir, 'server.yaml')).then(() => true, () => false)
+		&& !(await fs.access(path.join(dir, 'site.yaml')).then(() => true, () => false))
+	if (is_workspace) {
+		const sites_root = path.join(dir, 'sites')
+		const site_dirs = (await fs.readdir(sites_root, { withFileTypes: true }).catch(() => []))
+			.filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+			.map(entry => path.join(sites_root, entry.name))
+			.sort()
+		if (site_dirs.length === 0) {
+			console.log(chalk.yellow('No sites under sites/ to validate.'))
+			return
+		}
+		let failed = 0
+		for (const site_dir of site_dirs) {
+			if (!await validate_one_site(site_dir, `sites/${path.basename(site_dir)}`)) failed++
+		}
+		if (failed > 0) process.exit(1)
+		return
+	}
+	if (!await validate_one_site(dir)) process.exit(1)
+}
+
+// Returns false when there are errors (warnings alone pass).
+async function validate_one_site(site_dir: string, label?: string): Promise<boolean> {
 	const errors: ValidationError[] = []
 	const warnings: ValidationError[] = []
-	const site_dir = path.resolve(options.dir)
 
-	console.log(chalk.bold('\n🔍 Validating site structure...\n'))
+	console.log(chalk.bold(`\n🔍 Validating ${label ?? 'site structure'}...\n`))
 
 	try {
 		// Check if directory exists
@@ -330,7 +374,7 @@ export async function validate_site(options: ValidateOptions) {
 	// Print results
 	if (errors.length === 0 && warnings.length === 0) {
 		console.log(chalk.green('✓ All validations passed!\n'))
-		return
+		return true
 	}
 
 	if (warnings.length > 0) {
@@ -347,8 +391,9 @@ export async function validate_site(options: ValidateOptions) {
 			print_error(error)
 		}
 		console.log('')
-		process.exit(1)
+		return false
 	}
+	return true
 }
 
 async function validate_blocks(site_dir: string): Promise<ValidationError[]> {
