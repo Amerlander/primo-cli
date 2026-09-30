@@ -67,3 +67,50 @@ test('validate rejects repeater children under fields: and checks every site fro
 	assert.notEqual(broken.code, 0)
 	assert.match(broken.output, /go under "subfields:"/)
 })
+
+test('ids behind comments or in flow mappings are found, and dates survive stripping', async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), 'site-ids-'))
+	const source = await site(root, 'coffee', 'coffeesite00001')
+	const copy = path.join(root, 'sites', 'plumber')
+	await write(copy, 'site.yaml', 'name: Plumber\n')
+	await write(copy, 'blocks/hero/config.yaml', '_id: heroblock000001 # copied\nname: Hero\n')
+	await write(copy, 'pages/index.yaml', 'name: Home\npage_type: default\nfields:\n  published: 2026-01-15\nsections:\n  - {_id: section0000001a, block: hero}\n')
+	const copied = await find_copied_entity_ids(copy, [source])
+	assert.deepEqual(copied.map(c => c.id).sort(), ['heroblock000001', 'section0000001a'])
+	await strip_entity_ids(copy)
+	const page = await fs.readFile(path.join(copy, 'pages/index.yaml'), 'utf8')
+	assert.match(page, /published: 2026-01-15\n/)
+	assert.doesNotMatch(page, /_id/)
+	assert.deepEqual(yaml.load(page).sections, [{ block: 'hero' }])
+})
+
+test('primo new in CI does not start the CMS even with a terminal-like environment', async t => {
+	const workspace = await make_workspace(); t.after(workspace.cleanup)
+	const options = { cwd: workspace.work, home: workspace.home, timeout_ms: 20000, env: { CI: 'true' } }
+	await run_cli(['init', '--no-mcp', 'ws'], options)
+	const result = await run_cli(['new', 'demo'], { ...options, cwd: path.join(workspace.work, 'ws') })
+	assert.equal(result.code, 0, result.output)
+	assert.match(result.output, /primo dev/)
+})
+
+test('single-site push from a backup folder that shares a site_id is refused', async t => {
+	const workspace = await make_workspace(); t.after(workspace.cleanup)
+	await site(workspace.work, 'coffee', 'coffeesite00001')
+	const backup = await site(workspace.work, 'coffee.bak', 'coffeesite00001')
+	await write(workspace.work, 'server.yaml', 'site_groups: []\n')
+	const result = await run_cli(['push', '--server', 'http://127.0.0.1:9', '--yes'], { cwd: backup, home: workspace.home, timeout_ms: 20000 })
+	assert.notEqual(result.code, 0)
+	assert.match(result.output, /copies of the same site/)
+})
+
+test('workspace validate keeps going after a site with no homepage', async t => {
+	const workspace = await make_workspace(); t.after(workspace.cleanup)
+	const options = { cwd: workspace.work, home: workspace.home, timeout_ms: 20000 }
+	await run_cli(['init', '--no-mcp', 'ws'], options)
+	const ws = path.join(workspace.work, 'ws')
+	for (const name of ['a', 'b']) await run_cli(['new', name, '--skip-dev'], { ...options, cwd: ws })
+	await fs.rm(path.join(ws, 'sites/a/pages/index.yaml'))
+	const result = await run_cli(['validate'], { ...options, cwd: ws })
+	assert.notEqual(result.code, 0)
+	assert.match(result.output, /sites\/b/)
+})

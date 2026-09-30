@@ -46,8 +46,22 @@ export async function stop_runtime_processes(runtime: DevRuntime): Promise<void>
 		if (pid === undefined || pid === process.pid || !process_is_alive(pid)) continue
 		try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
 	}
-	for (let attempt = 0; attempt < 20 && runtime_has_live_process(runtime); attempt++) {
-		await new Promise(resolve => setTimeout(resolve, 100))
+	const wait = async (attempts: number) => {
+		for (let attempt = 0; attempt < attempts && runtime_has_live_process(runtime); attempt++) {
+			await new Promise(resolve => setTimeout(resolve, 100))
+		}
+	}
+	await wait(20)
+	if (!runtime_has_live_process(runtime)) return
+	// Didn't stop on SIGTERM within 2s: force it, and fail loudly if even that
+	// doesn't work rather than letting startup trip over it.
+	for (const pid of [runtime.cms_pid, runtime.pid]) {
+		if (pid === undefined || pid === process.pid || !process_is_alive(pid)) continue
+		try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+	}
+	await wait(20)
+	if (runtime_has_live_process(runtime)) {
+		throw new Error(`Could not stop the previous Primo session (pid ${[runtime.cms_pid, runtime.pid].filter(Boolean).join(', ')}). Stop it manually and try again.`)
 	}
 }
 

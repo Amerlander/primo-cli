@@ -302,7 +302,23 @@ export async function push_site(options: PushOptions): Promise<string[]> {
 		return failed
 	}
 
-	// Single-site mode (cwd is a site folder, or --dir points at one)
+	// Single-site mode (cwd is a site folder, or --dir points at one). If it
+	// sits under a workspace's sites/, a sibling with the same site_id means
+	// one of them is a copy that would overwrite the other on the server.
+	const parent = path.dirname(root_dir)
+	if (path.basename(parent) === 'sites') {
+		const siblings = (await fs.readdir(parent, { withFileTypes: true }))
+			.filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+			.map(entry => path.join(parent, entry.name))
+		const duplicates = await find_duplicate_site_ids(siblings)
+		const mine = [...duplicates].filter(([, dirs]) => dirs.includes(root_dir))
+		if (mine.length > 0) {
+			console.error(describe_duplicate_site_ids(new Map(mine), path.dirname(parent)))
+			process.exitCode = 1
+			return [path.basename(root_dir)]
+		}
+	}
+
 	const spinner = ora('Reading local files...').start()
 	try {
 		await push_single_site(root_dir, effective_options, spinner)

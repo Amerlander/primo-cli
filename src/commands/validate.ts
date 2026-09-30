@@ -315,7 +315,13 @@ export async function validate_site(options: ValidateOptions) {
 		}
 		let failed = 0
 		for (const site_dir of site_dirs) {
-			if (!await validate_one_site(site_dir, `sites/${path.basename(site_dir)}`)) failed++
+			try {
+				if (!await validate_one_site(site_dir, `sites/${path.basename(site_dir)}`)) failed++
+			} catch (error) {
+				// e.g. a missing pages/index.yaml: report it and keep going
+				console.log(chalk.red(`  ✖ ${error instanceof Error ? error.message : error}\n`))
+				failed++
+			}
 		}
 		if (failed > 0) process.exit(1)
 		return

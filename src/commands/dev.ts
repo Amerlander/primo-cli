@@ -1395,6 +1395,14 @@ export async function dev_server(options: DevOptions) {
 				const quarantined: string[] = []
 				for (const site of new_sites) {
 					if (known_sites.has(site.dir)) continue
+					// Discovery may pick a newly copied folder over an active site
+					// that shares its site_id. The active one wins; never import a
+					// second folder into a site that's already being synced.
+					const active = sites.find(existing => existing.config.site_id === site.config.site_id)
+					if (active) {
+						warn_once(site.dir, `  ⚠ ${path.relative(base_dir, site.dir)} has the same site_id as ${path.relative(base_dir, active.dir)}, which is already running, and was skipped. Keep backups outside sites/.`)
+						continue
+					}
 
 					known_sites.add(site.dir)
 					sites.push(site)
@@ -1661,8 +1669,10 @@ function warn_once(site_dir: string, message: string): void {
 async function discover_sites(base_dir: string): Promise<SiteInfo[]> {
 	const sites: SiteInfo[] = []
 	const sites_root = await get_sites_root(base_dir)
-	// Sorted so the original (a prefix of its backup's name) is kept on a clash
-	const entries = (await fs.readdir(sites_root, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))
+	// Shortest name first, so on a site_id clash the original is kept over a
+	// backup copy (`coffee` vs `coffee.bak`, `demo` vs `aaa-demo-backup`)
+	const entries = (await fs.readdir(sites_root, { withFileTypes: true }))
+		.sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name))
 
 	for (const entry of entries) {
 		if (entry.isDirectory() && !entry.name.startsWith('.')) {

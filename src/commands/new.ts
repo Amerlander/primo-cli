@@ -405,14 +405,14 @@ sections:
 				console.log(chalk.dim('  Restart `primo dev` to pick up the new site, or stop it and run `primo add <name>`.'))
 				console.log('')
 			}
-		} else if (!options.skipDev && process.stdin.isTTY && process.stdout.isTTY) {
+		} else if (!options.skipDev && process.stdin.isTTY && process.stdout.isTTY && !is_ci()) {
 			// No server running, start one. It runs in the foreground until
 			// Ctrl+C, so say so up front.
 			console.log('')
 			console.log(chalk.dim('  Starting the local CMS (runs until you press Ctrl+C; pass --skip-dev to only create files)...'))
 			await dev_server({ dir: base_dir })
 		} else if (!options.skipDev) {
-			// Not an interactive terminal (an agent, script, or CI): starting a
+			// Not an interactive terminal, or CI (an agent, script, or CI job): starting a
 			// server that never returns would hang the caller, so create the
 			// files and say how to start it.
 			console.log('')
@@ -431,6 +431,13 @@ sections:
 		spinner.fail(`Failed to create site: ${error instanceof Error ? error.message : error}`)
 		process.exit(1)
 	}
+}
+
+// CI runners can allocate a pseudo-terminal, so a TTY alone doesn't mean a
+// person is there to stop a foreground server.
+function is_ci(): boolean {
+	return ['CI', 'GITHUB_ACTIONS', 'GITLAB_CI', 'BUILDKITE', 'CIRCLECI', 'TRAVIS', 'JENKINS_URL', 'TEAMCITY_VERSION']
+		.some(name => !!process.env[name] && process.env[name] !== 'false')
 }
 
 // Shared name validation for both the interactive prompt and the CLI arg.
@@ -513,7 +520,7 @@ If a file appears to have lost content after a sync (deleted entries, shrunken Y
 ## Fields
 
 - Field types: ${VALID_FIELD_TYPES.map(type => `\`${type}\``).join(', ')}. Anything else fails validation.
-- Nested fields of a \`repeater\` or \`group\` go under \`subfields:\` (not \`fields:\`).
+- Nested fields of a \`repeater\` or \`group\` in block or site field definitions go under \`subfields:\` (not \`fields:\`). Page-type fields don't support nested fields.
 - \`site-field\` references a site field by name: \`config: { field: <site-field-name> }\`.
 - \`page-field\` references a page type field as \`<page-type-folder>--<field-key>\`, e.g. \`config: { field: blog-post--author }\`.
 - \`url\` holds a plain string (\`/about\`, \`https://...\`). \`link\` holds \`{ label, url }\`; a \`url\` that matches a page path is stored as a reference to that page.
