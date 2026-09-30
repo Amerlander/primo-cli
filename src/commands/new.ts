@@ -500,6 +500,7 @@ Without the MCP server, read \`sites/*/blocks/*/fields.yaml\` and \`sites/*/page
 - \`primo dev\` — start the local CMS and dev server. Run from the workspace root. It runs until stopped; from scripts or agents, run it in the background and stop it by PID.
 - \`primo new [name]\` — scaffold a new site under \`sites/\`. In an interactive terminal it then starts the CMS; add \`--skip-dev\` to only create files.
 - \`primo add <name>\` — register an existing \`sites/<name>\` folder with the CMS (mints its site_id and imports its records). Creating the folder alone doesn't register it. Stop \`primo dev\` first, then start it again afterwards. A folder copied from another site gets fresh ids automatically.
+- \`primo preview --dir sites/<name>\` — build that site's preview (needs \`primo dev\` running). Until a site's preview is built, its preview URL shows the CMS instead; rebuild after edits to see them there.
 - File edits sync automatically while \`primo dev\` is running. Structural changes (block schema, component) may trigger a browser reload.
 
 ## Shared library
