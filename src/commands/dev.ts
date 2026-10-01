@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from 'node:util'
 import fs from 'fs/promises'
 import path from 'path'
 import { createHash, randomInt } from 'crypto'
@@ -926,8 +927,27 @@ export async function dev_server(options: DevOptions) {
 					process.exit(1)
 				}
 				sites = [{ dir: base_dir, config }]
-			} catch {
-				spinner.fail(`No ${SERVER_CONFIG_FILE} or ${SITE_CONFIG_FILE} found. Run \`primo new\` first.`)
+			} catch (error) {
+				// A site.yaml that exists but can't be read is its own problem;
+				// don't misreport it as "no workspace here".
+				if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+					spinner.fail(`Could not read ${SITE_CONFIG_FILE}: ${stripVTControlCharacters(error instanceof Error ? error.message : String(error))}`)
+					process.exit(1)
+				}
+				// Common slip: running from the folder that *contains* the
+				// workspace (right after `primo init <name>`). Point at it.
+				const children = await fs.readdir(base_dir, { withFileTypes: true }).catch(() => [])
+				const workspaces: string[] = []
+				for (const entry of children) {
+					if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+					// Folder names go to the terminal; strip control sequences
+					if (await fs.access(path.join(base_dir, entry.name, SERVER_CONFIG_FILE)).then(() => true, () => false)) workspaces.push(stripVTControlCharacters(entry.name))
+				}
+				if (workspaces.length > 0) {
+					spinner.fail(`No ${SERVER_CONFIG_FILE} here. Run \`primo dev\` from inside your workspace: \`cd ${workspaces[0]}\`${workspaces.length > 1 ? ` (found: ${workspaces.join(', ')})` : ''}`)
+				} else {
+					spinner.fail(`No ${SERVER_CONFIG_FILE} or ${SITE_CONFIG_FILE} found. Run \`primo init\` to create a workspace, then \`primo new\` inside it.`)
+				}
 				process.exit(1)
 			}
 		}

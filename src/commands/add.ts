@@ -1,5 +1,5 @@
 import { read_dev_runtime, runtime_has_live_process, runtime_is_orphaned, describe_live_runtime } from '../utils/dev-runtime.js'
-import { requested_dev_port } from '../utils/dev-port.js'
+import { requested_dev_port, select_dev_port } from '../utils/dev-port.js'
 import fs from 'fs/promises'
 import net from 'net'
 import path from 'path'
@@ -81,7 +81,8 @@ export async function add_site(target: string, options: AddOptions) {
 		}
 		process.exit(1)
 	}
-	const { port } = requested_dev_port(options.port, server_config.port)
+	const requested = requested_dev_port(options.port, server_config.port)
+	let port = requested.port
 
 	// `primo add` is the only thing that mints a site_id for a hand-authored
 	// folder: `primo dev` skips a site without one rather than adopting it (see
@@ -101,11 +102,18 @@ export async function add_site(target: string, options: AddOptions) {
 		if (await is_server_running(port)) {
 			console.log(chalk.red(`A Primo server is running on port ${port}.`))
 			console.log(chalk.dim(`  Stop it (Ctrl+C in its terminal), run \`primo add ${target}\`, then start \`primo dev\` again.`))
-		} else {
-			console.log(chalk.red(`Port ${port} is in use, so \`primo add\` can't start a CMS to import into.`))
-			console.log(chalk.dim(`  Free the port (stop whatever is on it), then re-run \`primo add ${target}\`.`))
+			process.exit(1)
 		}
-		process.exit(1)
+		if (requested.explicit && options.port !== undefined) {
+			console.log(chalk.red(`Port ${port} is in use, so \`primo add\` can't start a CMS to import into.`))
+			console.log(chalk.dim(`  Free the port, or pass a different --port, then re-run \`primo add ${target}\`.`))
+			process.exit(1)
+		}
+		// Some other program holds the default port. The CMS here is a
+		// short-lived import, so any free port will do (a starting `primo dev`
+		// for this workspace is already caught by the runtime check above).
+		port = await select_dev_port({ port, explicit: false })
+		console.log(chalk.dim(`  port ${requested.port} is in use by another program; importing through port ${port}`))
 	}
 
 	// A folder started by copying another site carries that site's record ids,

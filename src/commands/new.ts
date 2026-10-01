@@ -415,8 +415,7 @@ sections:
 			console.log('')
 		} else {
 			console.log('')
-			console.log(chalk.dim(`  ${display_name} was created on disk but isn't registered yet.`))
-			console.log(chalk.dim('  Run `primo dev` to import it:'))
+			console.log(chalk.dim(`  ${display_name} was created. It loads into the CMS the next time you start it:`))
 			console.log(chalk.dim('    primo dev'))
 			console.log('')
 		}
@@ -468,7 +467,7 @@ function generate_id(): string {
 export async function ensure_agent_files(dir: string): Promise<void> {
 	const files: Array<[string, () => string]> = [
 		['AGENTS.md', generate_agent_md],
-		['CLAUDE.md', () => '@AGENTS.md\n']
+		['CLAUDE.md', () => '# Primo workspace\n\nClaude Code loads the line below as an import of this workspace\'s agent guide.\n\n@AGENTS.md\n']
 	]
 	for (const [name, contents] of files) {
 		const file = path.join(dir, name)
