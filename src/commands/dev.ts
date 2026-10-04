@@ -18,6 +18,7 @@ import { read_site_config, write_site_config, type SiteConfig, SITE_CONFIG_FILE 
 import { read_server_config, write_server_config, type ServerConfig, type SiteGroupConfig, format_group_name, group_id_notice, SERVER_CONFIG_FILE, resolve_format_options } from '../utils/server-config.js'
 import { format_file_contents, should_format, type FormatOptions } from '../utils/format.js'
 import { normalize_site } from './validate.js'
+import { check_dev_remote_changes } from '../utils/dev-remote-check.js'
 
 interface DevOptions {
 	dir: string
@@ -952,6 +953,17 @@ export async function dev_server(options: DevOptions) {
 			}
 		}
 
+		spinner.text = 'Checking hosted server changes...'
+		const remote_notices = await check_dev_remote_changes(base_dir, sites, server_config.server, is_server_mode)
+		if (remote_notices.length) {
+			spinner.stop()
+			console.log(chalk.yellow('  ⚠ Hosted sync check'))
+			for (const notice of remote_notices) console.log(chalk.yellow(`    ${stripVTControlCharacters(notice)}`))
+			console.log(chalk.dim('    Continuing with local development. To pull updates, save your work and stop primo dev first.'))
+			console.log('')
+			spinner.start()
+		}
+
 		// Ensure binary is installed
 		spinner.text = 'Checking primo...'
 		const binary_path = await ensure_binary()
@@ -1064,6 +1076,9 @@ export async function dev_server(options: DevOptions) {
 		await repoint_local_hosts(`http://127.0.0.1:${port}`, port)
 
 		spinner.succeed('Primo running')
+		if (remote_notices.length) {
+			console.log(chalk.yellow('  ⚠ Hosted sync needs attention — see the startup notices above. Push will check again.'))
+		}
 
 		// Restate any dropped-field warnings next to the banner. The per-field
 		// detail already printed above during import, but on a multi-site or

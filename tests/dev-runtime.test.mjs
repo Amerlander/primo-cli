@@ -8,6 +8,8 @@ import { once } from 'node:events'
 import { read_dev_runtime, resolve_dev_server, runtime_is_running, stop_runtime_processes } from '../dist/utils/dev-runtime.js'
 import { select_dev_port } from '../dist/utils/dev-port.js'
 import { CLI_ENTRY, make_workspace, run_cli } from './helpers/run-cli.mjs'
+import { start_mock_server } from './helpers/mock-server.mjs'
+import { save_baseline } from '../dist/utils/push-guard.js'
 
 async function fixture(t) {
  const workspace = await make_workspace(); t.after(workspace.cleanup)
@@ -150,6 +152,23 @@ test('server.yaml port controls actual startup without a CLI flag', async t => {
  const session = await start_dev(t, workspace)
  assert.equal(session.runtime.port, port)
  assert.equal((await fetch(`http://127.0.0.1:${port}/api/health`)).ok, true)
+})
+
+test('dev warns about a changed hosted library and still starts the local CMS', async t => {
+ const remote = await start_mock_server({ revisions: { library: 'v1:' + 'b'.repeat(64) } })
+ t.after(remote.close)
+ const workspace = await empty_workspace(t, `server: ${remote.url}\n`)
+ await workspace.write_token(remote.url, 'cached-token')
+ await fs.mkdir(path.join(workspace.work, 'library'))
+ await save_baseline(workspace.work, remote.url, 'library', 'v1:' + 'a'.repeat(64))
+ const session = await start_dev(t, workspace)
+ assert.match(session.output(), /Shared library: changed on .* since the last sync/)
+ assert.match(session.output(), /Continuing with local development/)
+ assert.ok(session.output().indexOf('Hosted sync check') < session.output().indexOf('Primo running'))
+ assert.ok(remote.requests.every(r => r.method === 'GET' && r.authorization === 'Bearer cached-token'))
+ assert.equal(await runtime_is_running(session.runtime), true)
+ const state = JSON.parse(await fs.readFile(path.join(workspace.work, '.primo/sync-state.json'), 'utf8'))
+ assert.equal(Object.values(state)[0].revision, 'v1:' + 'a'.repeat(64))
 })
 
 test('CLI --port actually controls the server despite a different configured port', async t => {
