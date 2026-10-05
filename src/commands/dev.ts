@@ -3512,12 +3512,16 @@ async function write_created_ids(
 	// or replace symbolic paths with this dev database's IDs.
 	const uploads_payload = created_ids['uploads/.manifest.json']
 	if (uploads_payload && typeof uploads_payload._uploads === 'object' && uploads_payload._uploads !== null) {
-		await preserve_upload_paths(site_dir, uploads_payload._uploads as Record<string, unknown>, async (file, raw) => {
-			const formatted = await format_file_contents(file, String(raw), workspace_dir, format_options)
-			mark_written_file(file, formatted)
-			await fs.writeFile(file, formatted, 'utf-8')
-		})
-		await remember_dev_upload_paths(site_dir, uploads_payload._uploads as Record<string, unknown>)
+		try {
+			await preserve_upload_paths(site_dir, uploads_payload._uploads as Record<string, unknown>, async (file, raw) => {
+				const formatted = await format_file_contents(file, String(raw), workspace_dir, format_options)
+				mark_written_file(file, formatted)
+				await fs.writeFile(file, formatted, 'utf-8')
+			})
+			await remember_dev_upload_paths(site_dir, uploads_payload._uploads as Record<string, unknown>)
+		} catch (error) {
+			console.log(chalk.yellow(`  Upload source writeback failed: ${error instanceof Error ? error.message : error}`))
+		}
 	}
 
 	for (const [relative_path, id_data] of Object.entries(created_ids)) {
