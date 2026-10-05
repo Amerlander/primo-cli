@@ -18,6 +18,7 @@ import { read_site_config, write_site_config, type SiteConfig, SITE_CONFIG_FILE 
 import { read_server_config, write_server_config, type ServerConfig, type SiteGroupConfig, format_group_name, group_id_notice, SERVER_CONFIG_FILE, resolve_format_options } from '../utils/server-config.js'
 import { format_file_contents, should_format, type FormatOptions } from '../utils/format.js'
 import { normalize_site } from './validate.js'
+import { preserve_upload_paths, prepare_dev_upload_export, remember_dev_upload_paths } from '../utils/portable-uploads.js'
 
 interface DevOptions {
 	dir: string
@@ -701,6 +702,7 @@ async function fetch_cms_site_snapshot(
 		await extract(temp_zip, { dir: temp_dir })
 		await fs.unlink(temp_zip)
 
+		await prepare_dev_upload_export(site_dir, temp_dir)
 		return await collect_site_snapshot(temp_dir, {
 			workspace_dir,
 			format_options: resolve_format_options(server_config),
@@ -1096,8 +1098,7 @@ export async function dev_server(options: DevOptions) {
 
 			// Start watching for file changes. `uploads` is included so dropping
 			// an image into uploads/ triggers a push — the server-side reconcile
-			// creates a site_uploads record for it and the writeback renames
-			// the local file to the canonical (suffixed) name.
+			// creates a site_uploads record while source upload paths stay portable.
 			const dirs_to_watch = ['blocks', 'page-types', 'pages', 'site', 'uploads']
 			const known_sites = new Set(sites.map(s => s.dir))
 
@@ -2861,11 +2862,8 @@ export async function import_site_files(site_dir: string, api_url: string, confi
 			if (bootstrap_response.ok) {
 				try {
 					const result = await bootstrap_response.json() as { created_ids?: Record<string, Record<string, unknown>>, warnings?: ImportWarning[], group_id?: string }
-					// Bootstrap runs the same import as the regular path, so it
-					// must write back created ids too — otherwise the very first
-					// push never renames upload files to their canonical suffixed
-					// names or rewrites symbolic refs, and later pushes keep
-					// re-sending the un-suffixed names (the upload dup bug).
+					// Bootstrap writes back content IDs and recovers legacy upload
+					// refs while preserving authored upload paths and filenames.
 					if (result.created_ids) {
 						await write_created_ids(site_dir, result.created_ids, server_config, workspace_dir)
 					}
@@ -3151,6 +3149,10 @@ async function sync_from_cms(site_dir: string, api_url: string, config: SiteConf
 		await fs.rm(temp_dir, { recursive: true, force: true })
 		return
 	}
+	await prepare_dev_upload_export(site_dir, temp_dir, async (file, contents) => {
+		mark_written_file(file, contents)
+		await fs.writeFile(file, contents)
+	})
 	const remote_snapshot = await collect_site_snapshot(temp_dir, {
 		workspace_dir,
 		format_options,
@@ -3505,13 +3507,17 @@ async function write_created_ids(
 ): Promise<void> {
 	const format_options = resolve_format_options(server_config)
 
-	// Upload writeback is special: rename local files and rewrite any yaml
-	// that still references symbolic paths. Surfaced under a non-standard
-	// `_uploads` key in created_ids["uploads/.manifest.json"] so the rest of
-	// this loop's `_id`/`sections` logic doesn't get confused by it.
+	// Keep uploads portable across local and hosted databases. The import
+	// response can recover legacy bare IDs, but must not rename authored files
+	// or replace symbolic paths with this dev database's IDs.
 	const uploads_payload = created_ids['uploads/.manifest.json']
 	if (uploads_payload && typeof uploads_payload._uploads === 'object' && uploads_payload._uploads !== null) {
-		await write_upload_writeback(site_dir, uploads_payload._uploads as Record<string, unknown>, server_config, workspace_dir)
+		await preserve_upload_paths(site_dir, uploads_payload._uploads as Record<string, unknown>, async (file, raw) => {
+			const formatted = await format_file_contents(file, String(raw), workspace_dir, format_options)
+			mark_written_file(file, formatted)
+			await fs.writeFile(file, formatted, 'utf-8')
+		})
+		await remember_dev_upload_paths(site_dir, uploads_payload._uploads as Record<string, unknown>)
 	}
 
 	for (const [relative_path, id_data] of Object.entries(created_ids)) {
@@ -3557,147 +3563,3 @@ async function write_created_ids(
 		}
 	}
 }
-
-// write_upload_writeback reconciles the local uploads/ folder and yaml refs
-// with what the server actually stored on the latest push.
-//
-// For each entry `symbolic -> {id, canonical}`:
-//   - If canonical != symbolic, rename uploads/<symbolic> to uploads/<canonical>
-//     on disk so subsequent pulls/pushes round-trip without churn.
-//   - Rewrite any yaml file that still says `upload: "uploads/<symbolic>"` to
-//     the record id, matching what the server stored. This converges the local
-//     copy with the server's canonical content shape without needing a pull.
-//
-// The watcher is told about each rename and rewrite via mark_written_file /
-// mark_deleted_path so it doesn't echo our own writes back as user edits.
-async function write_upload_writeback(
-	site_dir: string,
-	uploads_map: Record<string, unknown>,
-	server_config: ServerConfig,
-	workspace_dir: string
-): Promise<void> {
-	// Build a symbolic -> record-id map for the yaml rewrite pass. Skip
-	// malformed entries instead of failing the whole writeback so a partial
-	// server response can still rename what it can.
-	const symbolic_to_id = new Map<string, string>()
-	const renames: Array<{ symbolic: string; canonical: string }> = []
-
-	for (const [symbolic, raw_entry] of Object.entries(uploads_map)) {
-		if (!raw_entry || typeof raw_entry !== 'object') continue
-		const entry = raw_entry as Record<string, unknown>
-		const id = typeof entry.id === 'string' ? entry.id : ''
-		const canonical = typeof entry.canonical === 'string' ? entry.canonical : ''
-		if (!id) continue
-		symbolic_to_id.set(symbolic, id)
-		if (canonical && canonical !== symbolic) {
-			renames.push({ symbolic, canonical })
-		}
-	}
-
-	// Rename the on-disk files. Best-effort: if the symbolic file is missing
-	// (already renamed by a prior push, or removed by the user) we silently
-	// move on — the yaml rewrite still keeps content consistent.
-	const uploads_dir = path.join(site_dir, 'uploads')
-	for (const { symbolic, canonical } of renames) {
-		const from = path.join(uploads_dir, symbolic)
-		const to = path.join(uploads_dir, canonical)
-		try {
-			await fs.rename(from, to)
-			mark_deleted_path(from)
-			mark_written_file(to, await fs.readFile(to))
-		} catch {
-			// missing source or permission issue — skip
-		}
-	}
-
-	// Rewrite symbolic upload references across all yaml under the site dir.
-	// Walking the tree is bounded by site size and only re-marshals files
-	// that mention `uploads/` literally, so the cost is small even on large
-	// sites. Restricting to known sync subdirs avoids touching artifacts in
-	// dot-directories or build output.
-	if (symbolic_to_id.size === 0) return
-	const format_options = resolve_format_options(server_config)
-	for (const subdir of SITE_SYNC_DIRS) {
-		const root = path.join(site_dir, subdir)
-		const files = await walk_yaml_files(root).catch(() => [] as string[])
-		for (const file_path of files) {
-			try {
-				const content = await fs.readFile(file_path, 'utf-8')
-				if (!content.includes('uploads/')) continue
-				const parsed = load_yaml(content)
-				if (!parsed || typeof parsed !== 'object') continue
-				const { value: rewritten, changed } = rewrite_symbolic_upload_refs(parsed, symbolic_to_id)
-				if (!changed) continue
-				const raw = dump_yaml(rewritten, { lineWidth: -1 })
-				const formatted = await format_file_contents(file_path, raw, workspace_dir, format_options)
-				await fs.writeFile(file_path, formatted, 'utf-8')
-				mark_written_file(file_path, formatted)
-			} catch {
-				// skip unreadable / unparseable file
-			}
-		}
-	}
-}
-
-async function walk_yaml_files(root: string): Promise<string[]> {
-	const out: string[] = []
-	const stack: string[] = [root]
-	while (stack.length > 0) {
-		const dir = stack.pop() as string
-		let entries
-		try {
-			entries = await fs.readdir(dir, { withFileTypes: true })
-		} catch {
-			continue
-		}
-		for (const entry of entries) {
-			if (entry.name.startsWith('.')) continue
-			const full = path.join(dir, entry.name)
-			if (entry.isDirectory()) {
-				stack.push(full)
-			} else if (entry.isFile() && entry.name.endsWith('.yaml')) {
-				out.push(full)
-			}
-		}
-	}
-	return out
-}
-
-// rewrite_symbolic_upload_refs is the CLI mirror of the server's rewriteUploadRefs.
-// Walking on the CLI side handles the case where the server's in-zip rewrite
-// updated the imported content but the source files on disk still reference
-// the symbolic path. Without this pass, the next push would resend the
-// symbolic ref and force the server to re-resolve every time.
-function rewrite_symbolic_upload_refs(value: unknown, map: Map<string, string>): { value: unknown; changed: boolean } {
-	if (value && typeof value === 'object' && !Array.isArray(value)) {
-		const obj = value as Record<string, unknown>
-		let changed = false
-		const result: Record<string, unknown> = {}
-		for (const [k, v] of Object.entries(obj)) {
-			if (k === 'upload' && typeof v === 'string' && v.startsWith('uploads/')) {
-				const filename = v.substring('uploads/'.length)
-				const id = map.get(filename)
-				if (id) {
-					result[k] = id
-					changed = true
-					continue
-				}
-			}
-			const child = rewrite_symbolic_upload_refs(v, map)
-			result[k] = child.value
-			if (child.changed) changed = true
-		}
-		return { value: result, changed }
-	}
-	if (Array.isArray(value)) {
-		let changed = false
-		const result = value.map(item => {
-			const child = rewrite_symbolic_upload_refs(item, map)
-			if (child.changed) changed = true
-			return child.value
-		})
-		return { value: result, changed }
-	}
-	return { value, changed: false }
-}
-
