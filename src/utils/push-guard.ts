@@ -46,6 +46,24 @@ export async function save_baseline(dir: string, server: string, target: string,
 	await fs.rename(temp, state_path(dir))
 }
 
+// Read-only inspection shared by push preflight and the dev startup notice.
+// Never record the fetched revision: local files haven't received that data.
+export async function inspect_push_target(target: PushTarget, signal = AbortSignal.timeout(30000)) {
+	const response = await fetch(`${target.server}/api/primo/push-state/${encodeURIComponent(target.target)}`, {
+		headers: target.token ? { Authorization: `Bearer ${target.token}` } : {},
+		signal
+	})
+	if (response.status === 404) throw new Error('Server does not support safe pushes. Update the CMS first; no upload was attempted.')
+	if (!response.ok) throw new Error(await response_error(response))
+	const state = await response.json() as { protocol?: number; exists?: boolean; revision?: string }
+	if (state.protocol !== 1 || typeof state.exists !== 'boolean' || !revision_valid(state.revision)) {
+		throw new Error('Server returned an invalid push revision; cannot verify that pushing is safe.')
+	}
+	const baseline = (await read_baselines(target.dir))[state_key(target.server, target.target)]
+	return { revision: state.revision, exists: state.exists, has_baseline: !!baseline,
+		stale: baseline ? baseline.revision !== state.revision : state.exists }
+}
+
 export async function prepare_push(targets: PushTarget[], options: { force?: boolean; yes?: boolean; preview?: boolean }): Promise<PushPlan[]> {
 	const identities = targets.map(target => state_key(target.server, target.target))
 	if (new Set(identities).size !== identities.length) throw new Error('Multiple local folders target the same server site. Push stopped before any uploads.')
@@ -53,20 +71,10 @@ export async function prepare_push(targets: PushTarget[], options: { force?: boo
 	const errors: string[] = []
 	for (const target of targets) {
 		try {
-			const response = await fetch(`${target.server}/api/primo/push-state/${encodeURIComponent(target.target)}`, {
-				headers: target.token ? { Authorization: `Bearer ${target.token}` } : {},
-				signal: AbortSignal.timeout(30000)
-			})
-			if (response.status === 404) throw new Error('Server does not support safe pushes. Update the CMS first; no upload was attempted.')
-			if (!response.ok) throw new Error(await response_error(response))
-			const state = await response.json() as { protocol?: number; exists?: boolean; revision?: string }
-			if (state.protocol !== 1 || typeof state.exists !== 'boolean' || !revision_valid(state.revision)) {
-				throw new Error('Server returned an invalid push revision; cannot verify that pushing is safe.')
-			}
-			const baseline = (await read_baselines(target.dir))[state_key(target.server, target.target)]
-			const stale = baseline ? baseline.revision !== state.revision : state.exists
+			const state = await inspect_push_target(target)
+			const stale = state.stale
 			if (stale && !options.force && !options.preview) {
-				throw new Error(baseline
+				throw new Error(state.has_baseline
 					? 'changed on the server since the last sync (or was deleted).'
 					: 'has no saved baseline for this server. Pull first, or explicitly overwrite with --force.')
 			}
