@@ -739,7 +739,7 @@ function resolve_links(value: unknown, page_url_map: Map<string, string>, curren
 			return { ...obj, url, active: !!url && obj.page === current_page_id }
 		}
 		// URL-only and empty page-reference links have no current-page state.
-		if (typeof obj.page === 'string' || (typeof obj.url === 'string' && ('label' in obj || 'text' in obj))) {
+		if (typeof obj.page === 'string' || (typeof obj.url === 'string' && ('label' in obj || 'text' in obj || 'active' in obj))) {
 			return { ...obj, active: false }
 		}
 		// Otherwise recurse into every value (covers repeater arrays, groups,

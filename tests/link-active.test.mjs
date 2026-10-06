@@ -29,6 +29,10 @@ test('shared navigation computes active per page without changing authored conte
   - group:
       link: { url: 'https://example.com', label: External, active: true }
   - group:
+      link: { url: /about, active: true }
+  - group:
+      link: { url: 'https://unlabeled.example.com', active: true }
+  - group:
       link: { page: deleted00000001, label: Deleted, active: true }
   - group:
       link: { url: '', label: Empty, active: true }
@@ -37,7 +41,7 @@ test('shared navigation computes active per page without changing authored conte
 		await write('blocks/nav/config.yaml', 'name: Navigation\n')
 		await write('blocks/nav/fields.yaml', '- name: nav\n  type: site-field\n  config:\n    field: nav\n')
 		await write('blocks/nav/component.svelte', `<script>let { nav = [] } = $props()</script>
-<nav>{#each nav as item}<a href={item.group.link.url} class:active={item.group.link.active}>{item.group.link.label}</a>{/each}</nav>
+<nav>{#each nav as item}<a href={item.group.link.url} class:active={item.group.link.active}>{item.group.link.label || item.group.link.url}</a>{/each}</nav>
 `)
 		await write('page-types/default/config.yaml', 'name: Default\n')
 		await write('page-types/default/fields.yaml', '[]\n')
@@ -50,6 +54,8 @@ test('shared navigation computes active per page without changing authored conte
 		assert.equal(result.code, 0, result.output)
 		for (const [file, current] of [['index.html', 'Home'], ['about/index.html', 'About'], ['about/child/index.html', 'Child']]) {
 			const html = await fs.readFile(path.join(output, file), 'utf8')
+			assert.match(html, /<a\b[^>]*href="\/about"[^>]*>\/about<\/a>/, file)
+			assert.match(html, /<a\b[^>]*href="https:\/\/unlabeled\.example\.com"[^>]*>https:\/\/unlabeled\.example\.com<\/a>/, file)
 			const activeLabels = [...html.matchAll(/<a\b[^>]*class="[^"]*\bactive\b[^"]*"[^>]*>([^<]*)<\/a>/g)].map(match => match[1])
 			// Header, page section, and footer all resolve the same shared content.
 			assert.deepEqual(activeLabels, [current, current, current], file)
