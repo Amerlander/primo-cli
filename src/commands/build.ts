@@ -317,9 +317,10 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 		const combined_head_content = page_type_head ? `${head_content}\n${page_type_head}` : head_content
 
 		// Combine header + page sections + footer
-		const header_sections = await resolve_layout_sections(layout.header || [], site_dir, site_data, page_url_map)
-		const footer_sections = await resolve_layout_sections(layout.footer || [], site_dir, site_data, page_url_map)
-		const page_sections = await resolve_page_sections(page.sections || [], site_dir, site_data, page_url_map)
+		const current_page_id = page._id || page.id
+		const header_sections = await resolve_layout_sections(layout.header || [], site_dir, site_data, page_url_map, current_page_id)
+		const footer_sections = await resolve_layout_sections(layout.footer || [], site_dir, site_data, page_url_map, current_page_id)
+		const page_sections = await resolve_page_sections(page.sections || [], site_dir, site_data, page_url_map, current_page_id)
 		const sections = [...header_sections, ...page_sections, ...footer_sections]
 
 		// Head fragments see site fields merged with the page's own fields (page
@@ -658,7 +659,7 @@ async function load_layout(site_dir: string, page_type: string): Promise<Layout>
 	}
 }
 
-async function resolve_layout_sections(sections: PageSection[], site_dir: string, site_data: SiteData, page_url_map: Map<string, string>): Promise<PageSection[]> {
+async function resolve_layout_sections(sections: PageSection[], site_dir: string, site_data: SiteData, page_url_map: Map<string, string>, current_page_id?: string): Promise<PageSection[]> {
 	// For layout sections without content, load from block's content.yaml
 	const resolved: PageSection[] = []
 	for (const section of sections) {
@@ -672,12 +673,12 @@ async function resolve_layout_sections(sections: PageSection[], site_dir: string
 		// Resolve any site-field references in the content
 		const resolved_content = await resolve_site_fields(site_dir, section.block, content, site_data)
 		// Resolve internal page: links to URLs (walks nested repeaters/groups too)
-		resolved.push({ ...section, content: resolve_links(resolved_content, page_url_map) as Record<string, unknown> })
+		resolved.push({ ...section, content: resolve_links(resolved_content, page_url_map, current_page_id) as Record<string, unknown> })
 	}
 	return resolved
 }
 
-async function resolve_page_sections(sections: PageSection[], site_dir: string, site_data: SiteData, page_url_map: Map<string, string>): Promise<PageSection[]> {
+async function resolve_page_sections(sections: PageSection[], site_dir: string, site_data: SiteData, page_url_map: Map<string, string>, current_page_id?: string): Promise<PageSection[]> {
 	// Resolve site-field references in page sections. Like layout sections, a
 	// page section with no content of its own falls back to the block's
 	// content.yaml defaults, so a file-authored section renders its defaults
@@ -692,7 +693,7 @@ async function resolve_page_sections(sections: PageSection[], site_dir: string, 
 		}
 		const resolved_content = await resolve_site_fields(site_dir, section.block, content, site_data)
 		// Resolve internal page: links to URLs (walks nested repeaters/groups too)
-		resolved.push({ ...section, content: resolve_links(resolved_content, page_url_map) as Record<string, unknown> })
+		resolved.push({ ...section, content: resolve_links(resolved_content, page_url_map, current_page_id) as Record<string, unknown> })
 	}
 	return resolved
 }
@@ -724,24 +725,28 @@ async function build_page_url_map(site_dir: string, page_files: string[]): Promi
 // page URL map and populate `url`:
 //   - known page id      -> the page's live URL
 //   - missing/deleted id -> '' (degrades to href="#" downstream, never crashes)
-// Objects with only `url` (raw/external links) are left untouched, and every
-// other key on the link object (label, etc.) is preserved.
-function resolve_links(value: unknown, page_url_map: Map<string, string>): unknown {
+// `active` is derived per page, never taken from stored content. Raw URL links
+// are inactive; every other key on the link object (label, etc.) is preserved.
+function resolve_links(value: unknown, page_url_map: Map<string, string>, current_page_id?: string): unknown {
 	if (Array.isArray(value)) {
-		return value.map((item) => resolve_links(item, page_url_map))
+		return value.map((item) => resolve_links(item, page_url_map, current_page_id))
 	}
 	if (value && typeof value === 'object') {
 		const obj = value as Record<string, unknown>
 		// A link with a page reference: resolve it to a URL.
 		if (typeof obj.page === 'string' && obj.page) {
 			const url = page_url_map.get(obj.page) ?? ''
-			return { ...obj, url }
+			return { ...obj, url, active: !!url && obj.page === current_page_id }
+		}
+		// URL-only and empty page-reference links have no current-page state.
+		if (typeof obj.page === 'string' || (typeof obj.url === 'string' && ('label' in obj || 'text' in obj || 'active' in obj))) {
+			return { ...obj, active: false }
 		}
 		// Otherwise recurse into every value (covers repeater arrays, groups,
 		// and the `{ link: {...} }` wrapper repeaters produce).
 		const result: Record<string, unknown> = {}
 		for (const [key, child] of Object.entries(obj)) {
-			result[key] = resolve_links(child, page_url_map)
+			result[key] = resolve_links(child, page_url_map, current_page_id)
 		}
 		return result
 	}
