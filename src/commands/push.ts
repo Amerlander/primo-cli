@@ -4,7 +4,7 @@ import chalk from 'chalk'
 import ora, { type Ora } from 'ora'
 import archiver from 'archiver'
 import { prepare_push, append_push_guard, finish_push, response_error, type PushPlan, type PushTarget } from '../utils/push-guard.js'
-import { dump as dump_yaml, load as load_yaml } from 'js-yaml'
+import { preserve_upload_paths } from '../utils/portable-uploads.js'
 import { get_auth_token } from '../utils/auth.js'
 import { find_duplicate_site_ids, describe_duplicate_site_ids } from '../utils/site-ids.js'
 import { read_site_config, get_site_config_path, type SiteConfig, SITE_CONFIG_FILE } from '../utils/site-config.js'
@@ -64,177 +64,25 @@ async function root_dir_for(site_dir: string): Promise<string> {
 	return site_dir
 }
 
-// Converge the local site with the upload ids the server minted on push. The
-// server creates its own site_uploads record per file (it can't honor a foreign
-// CMS's id), renames files to a canonical suffixed name, and returns the
-// symbolic->{id,canonical} map. `primo dev` applies this writeback via its
-// watcher; `primo push` previously dropped it, so local refs stayed symbolic (or
-// worse, kept a stale id from another CMS) and drifted from the server forever.
-//
-// This mirrors write_upload_writeback in dev.ts but without the chokidar
-// bookkeeping (nothing is watching during a push). Best-effort throughout: a
-// push has already succeeded by the time we get here, so a writeback hiccup
-// should never fail the command.
+// Preserve portable source paths on hosted pushes too, so the next local dev
+// session can import them. Older bare IDs are recovered from manifest metadata.
 async function apply_upload_writeback(site_dir: string, workspace_dir: string, created_ids: CreatedIDs | undefined): Promise<void> {
-	const manifest = created_ids?.['uploads/.manifest.json']
-	const uploads_map = manifest && typeof manifest._uploads === 'object' && manifest._uploads !== null
-		? manifest._uploads as Record<string, unknown>
-		: null
-	if (!uploads_map) return
-
-	// Build symbolic-filename -> record-id map and the rename list. Both
-	// symbolic and canonical are treated as untrusted (they come from the
-	// server response): reject anything that isn't a plain basename so a
-	// crafted `../` can't make a later path.join escape uploads/ (CWE-22).
-	const symbolic_to_id = new Map<string, string>()
-	const rename_for = new Map<string, string>()
-	for (const [symbolic, raw] of Object.entries(uploads_map)) {
-		if (!raw || typeof raw !== 'object') continue
-		if (!is_safe_basename(symbolic)) continue
-		const entry = raw as Partial<UploadWritebackEntry>
-		if (typeof entry.id !== 'string' || !entry.id) continue
-		symbolic_to_id.set(symbolic, entry.id)
-		const canonical = typeof entry.canonical === 'string' ? entry.canonical : ''
-		if (canonical && canonical !== symbolic && is_safe_basename(canonical)) {
-			rename_for.set(symbolic, canonical)
-		}
-	}
-	if (symbolic_to_id.size === 0) return
-
-	// Rewrite refs FIRST, renames second — and only rename files whose ref
-	// rewrite actually succeeded. Renaming before rewriting risks leaving a file
-	// at its canonical name while the yaml still points at the old symbolic path
-	// (if the rewrite is skipped/unreadable/unwritable), which the next push
-	// would resend as a stale ref. So we rewrite yaml, track which symbolic keys
-	// were applied, and rename only those — keeping disk and yaml consistent even
-	// when some files can't be processed.
+	const entries = created_ids?.['uploads/.manifest.json']?._uploads
+	if (!entries || typeof entries !== 'object') return
 	let format_options
 	try {
 		format_options = resolve_format_options(await read_server_config(workspace_dir))
 	} catch {
 		format_options = resolve_format_options({} as ServerConfig)
 	}
-	// Track, per symbolic name, whether it was successfully rewritten in at least
-	// one file (`applied`) and whether ANY file that references it could not be
-	// persisted (`failed`). The same `upload: uploads/<name>` ref can appear in
-	// multiple files, so a name is only safe to rename once EVERY file bearing it
-	// is written — otherwise a skipped/failed file keeps the old symbolic ref
-	// while the file has already moved to its canonical name.
-	const applied = new Set<string>()
-	const failed = new Set<string>()
-	// Note which symbolic names a raw file mentions, so a file that fails before
-	// (or during) parse still marks its refs failed rather than silently passing.
-	const referenced_names = (raw: string): string[] =>
-		[...symbolic_to_id.keys()].filter(name => raw.includes(`uploads/${name}`))
-
-	for (const subdir of UPLOAD_REF_DIRS) {
-		const files = await walk_yaml_files(path.join(site_dir, subdir))
-		for (const file_path of files) {
-			let content: string
-			try {
-				content = await fs.readFile(file_path, 'utf-8')
-			} catch {
-				continue // unreadable file references nothing we can see; skip
-			}
-			if (!content.includes('uploads/')) continue
-			const names_here = referenced_names(content)
-			if (names_here.length === 0) continue
-			try {
-				const parsed = load_yaml(content)
-				if (!parsed || typeof parsed !== 'object') {
-					names_here.forEach(n => failed.add(n))
-					continue
-				}
-				const { value: rewritten, applied: file_applied } = rewrite_symbolic_upload_refs(parsed, symbolic_to_id)
-				if (file_applied.size === 0) continue
-				const raw = dump_yaml(rewritten, { lineWidth: -1 })
-				const formatted = await format_file_contents(file_path, raw, workspace_dir, format_options)
-				await fs.writeFile(file_path, formatted, 'utf-8')
-				for (const key of file_applied) applied.add(key)
-			} catch {
-				// parse/marshal/write failure — this file keeps its symbolic ref,
-				// so its name(s) must NOT be renamed even if another file succeeded.
-				names_here.forEach(n => failed.add(n))
-			}
-		}
+	try {
+		await preserve_upload_paths(site_dir, entries as Record<string, unknown>, async (file, raw) => {
+			const formatted = await format_file_contents(file, String(raw), workspace_dir, format_options)
+			await fs.writeFile(file, formatted, 'utf-8')
+		})
+	} catch (error) {
+		console.log(chalk.yellow(`  Upload source writeback failed: ${error instanceof Error ? error.message : error}`))
 	}
-
-	// Rename on-disk upload files to their canonical (server-suffixed) names,
-	// but only for names that were rewritten somewhere AND had no unpersisted
-	// reference anywhere. Missing source = already renamed or user-removed; skip.
-	const uploads_dir = path.join(site_dir, 'uploads')
-	for (const [symbolic, canonical] of rename_for) {
-		if (!applied.has(symbolic) || failed.has(symbolic)) continue
-		try {
-			await fs.rename(path.join(uploads_dir, symbolic), path.join(uploads_dir, canonical))
-		} catch {
-			// missing source or permission issue — skip
-		}
-	}
-}
-
-// Guard against path traversal / absolute paths in server-supplied upload
-// names. Only accept a plain filename (no separators, no `..`, no leading dot-dot).
-function is_safe_basename(name: string): boolean {
-	if (!name || name === '.' || name === '..') return false
-	if (name.includes('/') || name.includes('\\') || name.includes('\0')) return false
-	if (path.isAbsolute(name)) return false
-	return path.basename(name) === name
-}
-
-// Recursively collect .yaml files under a directory (dotfiles/dirs skipped).
-async function walk_yaml_files(root: string): Promise<string[]> {
-	const out: string[] = []
-	const stack: string[] = [root]
-	while (stack.length > 0) {
-		const dir = stack.pop() as string
-		let entries
-		try {
-			entries = await fs.readdir(dir, { withFileTypes: true })
-		} catch {
-			continue
-		}
-		for (const entry of entries) {
-			if (entry.name.startsWith('.')) continue
-			const full = path.join(dir, entry.name)
-			if (entry.isDirectory()) stack.push(full)
-			else if (entry.isFile() && entry.name.endsWith('.yaml')) out.push(full)
-		}
-	}
-	return out
-}
-
-// Rewrite `upload: "uploads/<file>"` values to the server record id. Mirrors the
-// server's rewriteUploadRefs (and dev.ts's copy). Returns the set of symbolic
-// filenames it actually remapped so the caller can rename exactly those files
-// (and only after the yaml write succeeds). Note this only remaps symbolic
-// paths — a bare id that matches no entry is left as-is (see PR notes on the
-// separate stale-cross-CMS-id repair still needed for already-broken refs).
-function rewrite_symbolic_upload_refs(value: unknown, map: Map<string, string>): { value: unknown; applied: Set<string> } {
-	const applied = new Set<string>()
-	const walk = (v: unknown): unknown => {
-		if (v && typeof v === 'object' && !Array.isArray(v)) {
-			const obj = v as Record<string, unknown>
-			const result: Record<string, unknown> = {}
-			for (const [k, val] of Object.entries(obj)) {
-				if (k === 'upload' && typeof val === 'string' && val.startsWith('uploads/')) {
-					const symbolic = val.substring('uploads/'.length)
-					const id = map.get(symbolic)
-					if (id) {
-						result[k] = id
-						applied.add(symbolic)
-						continue
-					}
-				}
-				result[k] = walk(val)
-			}
-			return result
-		}
-		if (Array.isArray(v)) return v.map(walk)
-		return v
-	}
-	const rewritten = walk(value)
-	return { value: rewritten, applied }
 }
 
 interface PushDiff {
@@ -249,15 +97,6 @@ interface PushDiff {
 // ._uploads as a symbolic-filename -> { id, canonical } map (id is the server's
 // record id; canonical is the PocketBase-suffixed on-disk filename).
 type CreatedIDs = Record<string, Record<string, unknown>>
-
-interface UploadWritebackEntry {
-	id: string
-	canonical: string
-}
-
-// Subdirs whose yaml may carry `upload: uploads/...` refs. Mirrors the server's
-// import scope (uploads/ itself holds binaries, not refs, so it's excluded).
-const UPLOAD_REF_DIRS = ['blocks', 'page-types', 'pages', 'site']
 
 // Returns the labels (site slugs / 'library') that failed to push so callers
 // like `primo deploy` can tell a clean run from a partial one. Empty = success.
@@ -567,11 +406,8 @@ async function push_single_site(site_dir: string, options: PushOptions, spinner:
 		spinner.succeed(`Pushed ${label}`)
 		console.log('')
 		print_diff(result.diff)
-		// The server mints its own record id for each uploaded file and returns
-		// the symbolic->id map in created_ids. Converge the local copy so refs
-		// point at the server's id and files carry their canonical names — the
-		// same writeback `primo dev` does. Without this, local and server drift,
-		// and a symbolic ref baked to a *different* CMS's id dangles forever.
+		// Keep source files portable; repair legacy bare upload IDs when the
+		// local manifest identifies their files.
 		await apply_upload_writeback(site_dir, await root_dir_for(site_dir), result.created_ids)
 		// NOTE: push intentionally does NOT republish the served site. It syncs
 		// content into the CMS; regenerating the published output stays a
