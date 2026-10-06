@@ -113,6 +113,62 @@ test('unreachable servers report unknown freshness without losing the baseline',
 	assert.equal(await fs.readFile(path.join(dir, '.primo/sync-state.json'), 'utf8'), baseline)
 })
 
+test('repeated authentication failures are summarized for the workspace and library', async t => {
+	const { workspace, sites } = await fixture(t)
+	const requests = []
+	const server = await listener(t, (req, res) => {
+		requests.push({ method: req.method, authorization: req.headers.authorization })
+		res.writeHead(401); res.end(JSON.stringify({ message: 'Authentication required.' }))
+	})
+	await workspace.write_token(server, 'cached-token')
+	const many = Array.from({ length: 77 }, (_, i) => ({ ...sites[0], config: { ...sites[0].config, site_id: `site-${i}` } }))
+	const notices = await check(workspace, many, server, true)
+	assert.deepEqual(notices, [
+		`${server}: could not check 77 sites and the shared library (Authentication required.). Server freshness is unknown.`
+	])
+	assert.equal(requests.length, 78)
+	assert.ok(requests.every(req => req.method === 'GET' && req.authorization === 'Bearer cached-token'))
+})
+
+test('failure groups preserve distinct reasons and actionable site notices', async t => {
+	const { workspace, sites, dir } = await fixture(t)
+	const server = await listener(t, (req, res) => {
+		const id = req.url.split('/').pop()
+		if (id.startsWith('auth-')) {
+			res.writeHead(401); res.end(JSON.stringify({ message: 'Authentication required.' }))
+		} else if (id.startsWith('invalid-')) {
+			res.writeHead(200); res.end(JSON.stringify({ protocol: 1, exists: true, revision: 'invalid' }))
+		} else {
+			res.writeHead(200); res.end(JSON.stringify({ protocol: 1, exists: id !== 'new',
+				revision: id === 'new' ? 'absent' : revision(id === 'demo' ? 'b' : 'a') }))
+		}
+	})
+	await save_baseline(dir, server, 'demo', revision('a'))
+	const baseline = await fs.readFile(path.join(dir, '.primo/sync-state.json'), 'utf8')
+	const many = ['demo', 'auth-1', 'unknown', 'invalid-1', 'auth-2', 'new', 'invalid-2'].map(id => ({
+		...sites[0], config: { ...sites[0].config, site_id: id, name: id }
+	}))
+	const notices = await check(workspace, many, server)
+	assert.equal(notices.length, 4)
+	assert.match(notices[0], /^demo: changed on/)
+	assert.equal(notices[1], `${server}: could not check 2 sites (Authentication required.). Server freshness is unknown.`)
+	assert.match(notices[2], /^unknown: no saved sync history/)
+	assert.match(notices[3], /could not check 2 sites .*invalid push revision/)
+	assert.equal(await fs.readFile(path.join(dir, '.primo/sync-state.json'), 'utf8'), baseline)
+})
+
+test('the same failure on different servers stays separate', async t => {
+	const { workspace, sites } = await fixture(t)
+	const handler = (req, res) => {
+		res.writeHead(401); res.end(JSON.stringify({ message: 'Authentication required.' }))
+	}
+	const servers = [await listener(t, handler), await listener(t, handler)]
+	const many = servers.flatMap(server => [1, 2].map(i => ({ ...sites[0],
+		config: { ...sites[0].config, site_id: `site-${i}`, server } })))
+	assert.deepEqual(await check(workspace, many), servers.map(server =>
+		`${server}: could not check 2 sites (Authentication required.). Server freshness is unknown.`))
+})
+
 test('stalled requests share a deadline for every site and the library', async t => {
 	const { workspace, sites } = await fixture(t)
 	const requests = []
@@ -124,8 +180,9 @@ test('stalled requests share a deadline for every site and the library', async t
 	const many = Array.from({ length: 5 }, (_, i) => ({ ...sites[0], config: { ...sites[0].config, site_id: `site-${i}` } }))
 	const start = Date.now()
 	const notices = await check(workspace, many, server, true, 500)
-	assert.equal(notices.length, 6)
-	assert.ok(notices.every(notice => notice.includes('check timed out')))
+	assert.deepEqual(notices, [
+		`${server}: could not check 5 sites and the shared library (check timed out). Server freshness is unknown.`
+	])
 	assert.equal(requests.length, 6)
 	assert.ok(Date.now() - start < 2500, 'timeout should apply once, not once per target')
 })

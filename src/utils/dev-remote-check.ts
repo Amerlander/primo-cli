@@ -5,6 +5,12 @@ import { inspect_push_target, type PushTarget } from './push-guard.js'
 import { normalize_server_url } from './server-config.js'
 import type { SiteConfig } from './site-config.js'
 
+interface FailureGroup {
+	server: string
+	reason: string
+	targets: PushTarget[]
+}
+
 // Advisory only: no login prompt, pull, or baseline write. All requests share
 // one deadline so an offline server doesn't delay startup once per site.
 export async function check_dev_remote_changes(
@@ -38,8 +44,38 @@ export async function check_dev_remote_changes(
 				: `${target.label}: no saved sync history for ${target.server}; server freshness is unknown. Save any local work before pulling.`
 		} catch (error) {
 			const reason = signal.aborted ? 'check timed out' : error instanceof Error ? error.message : String(error)
-			return `${target.label}: could not check ${target.server} (${reason}). Server freshness is unknown.`
+			return { target, reason }
 		}
 	}))
-	return results.filter((result): result is string => result !== null)
+	// Keep actionable per-target notices, but report repeated check failures
+	// once per server and reason, in the order they first appeared.
+	const notices: (string | FailureGroup)[] = []
+	const failures = new Map<string, FailureGroup>()
+	for (const result of results) {
+		if (result === null) continue
+		if (typeof result === 'string') {
+			notices.push(result)
+			continue
+		}
+		const { target, reason } = result
+		const key = JSON.stringify([target.server, reason])
+		let group = failures.get(key)
+		if (!group) {
+			group = { server: target.server, reason, targets: [] }
+			failures.set(key, group)
+			notices.push(group)
+		}
+		group.targets.push(target)
+	}
+	return notices.map(notice => {
+		if (typeof notice === 'string') return notice
+		const { server, reason, targets } = notice
+		if (targets.length === 1) {
+			return `${targets[0].label}: could not check ${server} (${reason}). Server freshness is unknown.`
+		}
+		const library = targets.some(target => target.target === 'library')
+		const sites = targets.length - Number(library)
+		const scope = `${sites} site${sites === 1 ? '' : 's'}${library ? ' and the shared library' : ''}`
+		return `${server}: could not check ${scope} (${reason}). Server freshness is unknown.`
+	})
 }
