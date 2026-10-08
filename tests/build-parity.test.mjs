@@ -15,6 +15,7 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  * - Rich-text (tiptap JSON or markdown) and markdown values become HTML.
  * - Fields without a value get the server's empty value instead of undefined.
  * - Pages use the server's markup: header/main/footer zones, section wrappers.
+ * - The page type's foot.html follows site/foot.html, verbatim.
  * - Blocks with a script get a /_symbols bundle and are hydrated on the page.
  */
 
@@ -355,6 +356,24 @@ describe('primo build parity', () => {
 			assert.match(baseline[1], /a \{\n {4}color: inherit;\n {2}\}\n$/)
 			assert.doesNotMatch(head, /overflow-wrap/, 'the old CLI-only reset is gone')
 			assert.ok(head.indexOf('data-primo-baseline') < head.indexOf('<title>Fixture</title>'), 'baseline precedes the site head')
+		} finally {
+			await cleanup()
+		}
+	})
+
+	test('the page type foot follows the site foot before </body>', async () => {
+		const { result, html, cleanup } = await build({
+			fields: '- name: headline\n  type: text\n',
+			content: 'headline: Hello\n',
+			component: '<h1>{headline}</h1>\n',
+			async setup(site_dir) {
+				await write_file(site_dir, 'site/foot.html', '<script>site_foot()</script>')
+				await write_file(site_dir, 'page-types/default/foot.html', '<div>{headline}</div>')
+			}
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			assert.match(html, /<script>site_foot\(\)<\/script><div>\{headline\}<\/div><\/body>/, 'site foot, then page type foot, verbatim')
 		} finally {
 			await cleanup()
 		}

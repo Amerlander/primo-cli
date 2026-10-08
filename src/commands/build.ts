@@ -141,8 +141,8 @@ export async function build_site(options: BuildOptions) {
 		}
 
 		// site/foot.html is verbatim HTML appended before </body> on every page —
-		// no templating, matching server publish. page-types/*/foot.html is
-		// intentionally not included (it isn't in server publish either).
+		// no templating, matching server publish. The page type's foot.html
+		// follows it (see build_page).
 		let foot_content = ''
 		try {
 			foot_content = await fs.readFile(path.join(site_dir, 'site', 'foot.html'), 'utf-8')
@@ -180,6 +180,9 @@ export async function build_site(options: BuildOptions) {
 		// string = no head.svelte for that page type).
 		const page_type_head_cache = new Map<string, string>()
 
+		// Cache per-page-type foot.html (empty string = none)
+		const page_type_foot_cache = new Map<string, string>()
+
 		// Load site data (fields, content, pages and page types)
 		const site_data = await load_site_data(site_dir, page_files)
 
@@ -205,6 +208,7 @@ export async function build_site(options: BuildOptions) {
 				client_cache,
 				layout_cache,
 				page_type_head_cache,
+				page_type_foot_cache,
 				site_data,
 				page_url_map
 			})
@@ -288,6 +292,7 @@ interface BuildPageOptions {
 	client_cache: Map<string, boolean>
 	layout_cache: Map<string, Layout>
 	page_type_head_cache: Map<string, string>
+	page_type_foot_cache: Map<string, string>
 	site_data: SiteData
 	page_url_map: Map<string, string>
 }
@@ -335,8 +340,27 @@ async function load_page_type_head(
 	return content
 }
 
+// Lazily load a page type's foot.html: verbatim HTML, no templating, like
+// site/foot.html. Empty string means "no foot file present".
+async function load_page_type_foot(
+	site_dir: string,
+	page_type: string,
+	cache: Map<string, string>
+): Promise<string> {
+	const cached = cache.get(page_type)
+	if (cached !== undefined) return cached
+	let content = ''
+	try {
+		content = await fs.readFile(path.join(site_dir, 'page-types', page_type, 'foot.html'), 'utf-8')
+	} catch (error: any) {
+		if (error?.code !== 'ENOENT') throw error
+	}
+	cache.set(page_type, content)
+	return content
+}
+
 async function build_page(options: BuildPageOptions): Promise<{ html: string; error?: string }> {
-	const { page, page_path, site_dir, temp_dir, output_dir, head_content, foot_content, site_name, block_cache, client_cache, layout_cache, page_type_head_cache, site_data, page_url_map } = options
+	const { page, page_path, site_dir, temp_dir, output_dir, head_content, foot_content, site_name, block_cache, client_cache, layout_cache, page_type_head_cache, page_type_foot_cache, site_data, page_url_map } = options
 
 	try {
 		const page_build_id = safe_temp_id(page._id || page.id || page_path || page.name || 'page')
@@ -353,6 +377,10 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 		// publish behavior (site.head + page_type.head).
 		const page_type_head = await load_page_type_head(site_dir, page_type, page_type_head_cache)
 		const combined_head_content = page_type_head ? `${head_content}\n${page_type_head}` : head_content
+
+		// Server publish appends site.foot + page_type.foot before </body>,
+		// verbatim and without a separator.
+		const page_type_foot = await load_page_type_foot(site_dir, page_type, page_type_foot_cache)
 
 		// The page's own fields, which page-field fields in every section
 		// (layout ones included) read, as on server publish
@@ -495,7 +523,7 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 ${block_css ? `	<style>\n${block_css}\n	</style>\n` : ''}</head>
 <body id="page">
 ${rendered.body || ''}
-${hydration_script}${foot_content}</body>
+${hydration_script}${foot_content}${page_type_foot}</body>
 </html>`
 
 		return { html }
