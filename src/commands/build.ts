@@ -474,7 +474,8 @@ async function compile_block(site_dir: string, block_name: string, temp_dir: str
 	const component_path = path.join(site_dir, 'blocks', block_name, 'component.svelte')
 
 	try {
-		const source = await fs.readFile(component_path, 'utf-8')
+		const fields = await load_block_fields(site_dir, block_name)
+		const source = inject_field_props(await fs.readFile(component_path, 'utf-8'), fields.map((field) => field.name))
 
 		// Compile with Svelte
 		const compiled = compile(source, {
@@ -496,6 +497,20 @@ async function compile_block(site_dir: string, block_name: string, temp_dir: str
 		console.log(chalk.yellow(`  Warning: Could not compile block "${block_name}": ${error}`))
 		return { js: '', css: '' }
 	}
+}
+
+// Blocks may use their fields as bare identifiers without declaring props.
+// Server publish injects `let { <fields> } = $props()` into any block that
+// doesn't call $props() itself; do the same so such blocks render here too.
+function inject_field_props(source: string, field_names: unknown[]): string {
+	if (source.includes('$props(')) return source
+	const keys = head_identifier_keys(field_names.filter((name): name is string => typeof name === 'string'))
+	if (keys.length === 0) return source
+	const declaration = `let { ${keys.join(', ')} } = $props()`
+	const instance_script = /<script(?![^>]*\bmodule\b)(?![^>]*\bcontext\s*=\s*["']module["'])[^>]*>/
+	return instance_script.test(source)
+		? source.replace(instance_script, (tag) => `${tag}\n${declaration}\n`)
+		: `<script>\n${declaration}\n</script>\n${source}`
 }
 
 function generate_page_component(components: Array<{ name: string; block_name: string; props: Record<string, unknown> }>, sections: PageSection[], head_content: string, head_keys: string[]): string {

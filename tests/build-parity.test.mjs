@@ -8,6 +8,7 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  * `primo build` must render blocks the way server publish does:
  *
  * - Blocks may import svelte subpaths (`svelte/transition`, `svelte/store`).
+ * - Blocks that don't call $props() see their fields as bare identifiers.
  */
 
 async function write_file(root, rel, content) {
@@ -64,6 +65,26 @@ describe('primo build parity', () => {
 			assert.match(html, /<h1>Hello 1<\/h1>/)
 		} finally {
 			await cleanup()
+		}
+	})
+
+	test('blocks without $props() get their fields as props', async () => {
+		const fields = '- name: headline\n  type: text\n- name: tagline\n  type: text\n'
+		const content = 'headline: Hello\ntagline: World\n'
+		const markup = await build({ fields, content, component: '<h1>{headline}</h1><p>{tagline}</p>\n' })
+		const scripted = await build({
+			fields,
+			content,
+			component: '<script module>export const meta = 1</script>\n<script>\nconst loud = $derived(headline.toUpperCase())\n</script>\n<h1>{loud}</h1><p>{tagline}</p>\n'
+		})
+		try {
+			assert.equal(markup.result.code, 0, markup.result.output)
+			assert.match(markup.html, /<h1>Hello<\/h1><p>World<\/p>/)
+			assert.equal(scripted.result.code, 0, scripted.result.output)
+			assert.match(scripted.html, /<h1>HELLO<\/h1><p>World<\/p>/)
+		} finally {
+			await markup.cleanup()
+			await scripted.cleanup()
 		}
 	})
 })
