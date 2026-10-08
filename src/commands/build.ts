@@ -779,7 +779,8 @@ function is_plain_object(value: unknown): value is Record<string, unknown> {
 // Convert stored field values into what blocks and head fragments receive,
 // by field type, as server publish does (see the CMS's Content.svelte.ts).
 // Walks repeater/group subfields; keys without a field definition pass
-// through unchanged. Returns new objects, never mutates `content`.
+// through unchanged, fields without a value get the server's empty value.
+// Returns new objects, never mutates `content`.
 function resolve_field_values(
 	fields: Array<SiteField | BlockField>,
 	content: Record<string, unknown>,
@@ -787,7 +788,12 @@ function resolve_field_values(
 ): Record<string, unknown> {
 	const resolved: Record<string, unknown> = { ...content }
 	for (const field of fields as BlockField[]) {
-		if (!field?.name || !(field.name in resolved)) continue
+		if (!field?.name) continue
+		if (resolved[field.name] === undefined) {
+			const empty = empty_field_value(field)
+			if (empty !== undefined) resolved[field.name] = empty
+			continue
+		}
 		const value = resolved[field.name]
 		const subfields = Array.isArray(field.subfields) ? field.subfields : []
 		if (field.type === 'image') {
@@ -803,6 +809,27 @@ function resolve_field_values(
 		}
 	}
 	return resolved
+}
+
+// What server publish hands a block for a field with no value, so blocks can
+// read e.g. `image.url` on any section. Site/page references are resolved
+// elsewhere (or not at all) and stay undefined. An empty rich-text field is
+// '' here; the server passes an empty tiptap doc object.
+function empty_field_value(field: BlockField): unknown {
+	switch (field.type) {
+		case 'image': return { url: '', src: '', alt: '', size: null, width: null, height: null }
+		case 'link': return { url: '', label: '', text: '', active: false }
+		case 'repeater': return []
+		case 'group': return {}
+		case 'switch': return true
+		case 'number': return 0
+		case 'info': return null
+		case 'site-field':
+		case 'page-field':
+		case 'page':
+		case 'page-list': return undefined
+		default: return ''
+	}
 }
 
 // An image's own url wins; otherwise its upload resolves to the copy of the

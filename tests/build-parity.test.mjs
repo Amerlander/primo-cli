@@ -12,6 +12,7 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  * - Image fields referencing an upload (manifest ID or `uploads/<file>`)
  *   get a url pointing at the copied file, in site content and sections.
  * - Rich-text (tiptap JSON or markdown) and markdown values become HTML.
+ * - Fields without a value get the server's empty value instead of undefined.
  */
 
 async function write_file(root, rel, content) {
@@ -207,6 +208,51 @@ describe('primo build parity', () => {
 			assert.match(html, /<p>Plain <em>markdown<\/em><\/p>/)
 			assert.match(html, /<p><strong>md<\/strong> text<\/p>/)
 			assert.match(html, /<div class="item"><!---->?<p>Nested<\/p>/)
+		} finally {
+			await cleanup()
+		}
+	})
+
+	test('fields without a value get the empty value server publish passes', async () => {
+		const { result, html, cleanup } = await build({
+			fields: [
+				'- name: headline',
+				'  type: text',
+				'- name: image',
+				'  type: image',
+				'- name: cta',
+				'  type: link',
+				'- name: meta',
+				'  type: group',
+				'  subfields:',
+				'    - name: note',
+				'      type: text',
+				'- name: cards',
+				'  type: repeater',
+				'  subfields:',
+				'    - name: title',
+				'      type: text',
+				'    - name: photo',
+				'      type: image',
+				''
+			].join('\n'),
+			content: 'headline: Hello\ncards:\n  - title: One\n',
+			component: [
+				'<h1>{headline}</h1>',
+				'<img class="image" src={image.url} alt={image.alt}>',
+				'<a href={cta.url || "#"}>{cta.label}</a>',
+				'<p class="note">[{meta.note ?? "none"}]</p>',
+				'{#each cards as card}<img class="card" src={card.photo.url} alt={card.title}>{/each}',
+				''
+			].join('\n')
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			assert.match(html, /<h1>Hello<\/h1>/)
+			assert.match(html, /<img class="image" src="" alt=""\/?>/)
+			assert.match(html, /<a href="#"><\/a>/)
+			assert.match(html, /<p class="note">\[none\]<\/p>/)
+			assert.match(html, /<img class="card" src="" alt="One"\/?>/)
 		} finally {
 			await cleanup()
 		}
