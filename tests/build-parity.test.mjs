@@ -10,7 +10,8 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  * - Blocks may import svelte subpaths (`svelte/transition`, `svelte/store`).
  * - Blocks that don't call $props() see their fields as bare identifiers.
  * - Image fields referencing an upload (manifest ID or `uploads/<file>`)
- *   get a url pointing at the copied file, in site content and sections.
+ *   get a /_uploads url, as on server publish, in site content and sections.
+ *   Upload dotfiles (the manifest) are not published.
  * - Rich-text (tiptap JSON or markdown) and markdown values become HTML.
  * - Fields without a value get the server's empty value instead of undefined.
  * - Pages use the server's markup: header/main/footer zones, section wrappers.
@@ -94,7 +95,7 @@ describe('primo build parity', () => {
 		}
 	})
 
-	test('image uploads resolve to the copied /uploads files', async () => {
+	test('image uploads resolve to the copied /_uploads files', async () => {
 		const { result, html, out_dir, cleanup } = await build({
 			fields: [
 				'- name: image',
@@ -147,11 +148,14 @@ describe('primo build parity', () => {
 		})
 		try {
 			assert.equal(result.code, 0, result.output)
-			assert.match(html, /<nav><img src="\/uploads\/logo\.png" alt="Logo"\/?><\/nav>/)
-			assert.match(html, /class="hero" src="\/uploads\/hero%20shot\.jpg" alt="Hero"/)
+			assert.match(html, /<nav><img src="\/_uploads\/logo\.png" alt="Logo"\/?><\/nav>/)
+			assert.match(html, /class="hero" src="\/_uploads\/hero%20shot\.jpg" alt="Hero"/)
 			assert.match(html, /class="external" src="https:\/\/cdn\.example\.com\/kept\.png"/)
-			assert.match(html, /class="photo" src="\/uploads\/logo\.png"/)
-			await fs.access(path.join(out_dir, 'uploads', 'hero shot.jpg'))
+			assert.match(html, /class="photo" src="\/_uploads\/logo\.png"/)
+			await fs.access(path.join(out_dir, '_uploads', 'hero shot.jpg'))
+			// A pulled file keeps the server's name, so CMS /_uploads/ paths hold
+			await fs.access(path.join(out_dir, '_uploads', 'logo.png'))
+			await assert.rejects(fs.access(path.join(out_dir, 'uploads')))
 		} finally {
 			await cleanup()
 		}
@@ -170,7 +174,7 @@ describe('primo build parity', () => {
 		})
 		try {
 			assert.equal(result.code, 0, result.output)
-			const uploads_dir = path.join(out_dir, 'uploads')
+			const uploads_dir = path.join(out_dir, '_uploads')
 			assert.deepEqual((await fs.readdir(uploads_dir, { recursive: true })).map((file) => file.replaceAll('\\', '/')).sort(), ['logo.png', 'nested'])
 		} finally {
 			await cleanup()

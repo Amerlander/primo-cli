@@ -19,6 +19,9 @@ img, picture, video, canvas, svg { display: block; max-width: 100%; }
 input, button, textarea, select { font: inherit; }
 p, h1, h2, h3, h4, h5, h6 { overflow-wrap: break-word; }`
 
+// Output directory for uploads, same as server publish (sites/<host>/_uploads)
+const UPLOADS_DIR = '_uploads'
+
 interface BuildOptions {
 	dir: string
 	output: string
@@ -223,9 +226,11 @@ export async function build_site(options: BuildOptions) {
 			await fs.writeFile(out_path, result.html)
 		}
 
-		// Copy uploads directory
+		// Publish uploads where server publish serves them: /_uploads/<file>.
+		// A pulled site's files carry the server's stored filenames, so CMS
+		// content pointing at /_uploads/... resolves here too.
 		const uploads_src = path.join(site_dir, 'uploads')
-		const uploads_dest = path.join(output_dir, 'uploads')
+		const uploads_dest = path.join(output_dir, UPLOADS_DIR)
 		try {
 			await copy_dir(uploads_src, uploads_dest)
 		} catch {
@@ -1038,14 +1043,15 @@ function empty_field_value(field: BlockField): unknown {
 }
 
 // An image's own url wins; otherwise its upload resolves to the copy of the
-// file the build writes to /uploads/. `upload` is either a manifest ID (as
+// file the build writes to /_uploads/. `upload` is either a manifest ID (as
 // pulled from the hosted server) or a symbolic `uploads/<file>` path.
 function resolve_image(value: unknown, uploads: Map<string, string>): unknown {
 	if (!is_plain_object(value) || (typeof value.url === 'string' && value.url)) return value
 	const upload = typeof value.upload === 'string' ? value.upload : ''
 	const upload_path = upload.startsWith('uploads/') ? upload : uploads.get(upload)
 	if (!upload_path) return value
-	return { ...value, url: `/${upload_path.split('/').map(encodeURIComponent).join('/')}` }
+	const file = upload_path.slice('uploads/'.length)
+	return { ...value, url: `/${UPLOADS_DIR}/${file.split('/').map(encodeURIComponent).join('/')}` }
 }
 
 async function load_block_defaults(site_dir: string, block_name: string): Promise<Record<string, unknown>> {
