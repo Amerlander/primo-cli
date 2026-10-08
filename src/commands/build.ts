@@ -327,6 +327,11 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 		const footer_sections = await resolve_layout_sections(layout.footer || [], site_dir, site_data, page_url_map, current_page_id)
 		const page_sections = await resolve_page_sections(page.sections || [], site_dir, site_data, page_url_map, current_page_id)
 		const sections = [...header_sections, ...page_sections, ...footer_sections]
+		const section_slots = get_section_slots([
+			...header_sections.map((section) => ({ section, zone: 'header' as const })),
+			...page_sections.map((section) => ({ section, zone: 'main' as const })),
+			...footer_sections.map((section) => ({ section, zone: 'footer' as const }))
+		])
 
 		// Head fragments see site fields merged with the page's own fields (page
 		// wins), each pre-declared as a bare identifier — same scope as server
@@ -344,10 +349,8 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 
 		// Compile each block and collect CSS
 		const all_css: string[] = []
-		const section_components: string[] = []
 
-		for (let i = 0; i < sections.length; i++) {
-			const section = sections[i]
+		for (const section of sections) {
 			const block_name = section.block
 
 			// Check cache first
@@ -360,21 +363,13 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 			if (compiled.css) {
 				all_css.push(compiled.css)
 			}
-
-			// Create import and usage for this section
-			const component_name = `Section_${i}_${block_name.replace(/-/g, '_')}`
-			section_components.push({
-				name: component_name,
-				block_name,
-				props: section.content || {}
-			} as any)
 		}
 
 		// Create a page component that renders all sections and the head. The
 		// head rides through <svelte:head> so its Svelte syntax ({expression},
 		// {@html}, {#if}) is actually evaluated — pasting the fragment into the
 		// output verbatim leaked raw template syntax into deployed pages.
-		const page_component = generate_page_component(section_components as any, sections, combined_head_content, head_keys)
+		const page_component = generate_page_component(section_slots, combined_head_content, head_keys)
 		const page_component_path = path.join(temp_dir, `page_${page_build_id}.svelte`)
 		await fs.writeFile(page_component_path, page_component)
 
@@ -460,7 +455,7 @@ ${CSS_RESET}
 	</style>
 	${rendered.head || ''}
 ${block_css ? `	<style>\n${block_css}\n	</style>\n` : ''}</head>
-<body>
+<body id="page">
 ${rendered.body || ''}
 ${foot_content}</body>
 </html>`
@@ -519,14 +514,32 @@ function inject_field_props(source: string, field_names: unknown[]): string {
 		: `<script>\n${declaration}\n</script>\n${source}`
 }
 
-function generate_page_component(components: Array<{ name: string; block_name: string; props: Record<string, unknown> }>, sections: PageSection[], head_content: string, head_keys: string[]): string {
-	const imports = sections.map((section, i) => {
-		const safe_name = section.block.replace(/-/g, '_')
+interface SectionSlot {
+	section: PageSection
+	zone: 'header' | 'main' | 'footer'
+	// Page-unique wrapper id: the section's _id when it has one
+	dom_id: string
+}
+
+// Give each section a page-unique wrapper id, like the section record ids
+// server publish uses.
+function get_section_slots(sections: Array<Omit<SectionSlot, 'dom_id'>>): SectionSlot[] {
+	const used = new Set<string>()
+	return sections.map((slot, i) => {
+		let dom_id = safe_temp_id(slot.section._id || `${i}`)
+		if (used.has(dom_id)) dom_id = `${dom_id}-${i}`
+		used.add(dom_id)
+		return { ...slot, dom_id }
+	})
+}
+
+function generate_page_component(slots: SectionSlot[], head_content: string, head_keys: string[]): string {
+	const imports = slots.map(({ section }, i) => {
 		return `import Section_${i} from './${section.block}.compiled.js'`
 	}).join('\n')
 
 	const props_declarations = [
-		...sections.map((_, i) => `section_${i}_props = {}`),
+		...slots.map((_, i) => `section_${i}_props = {}`),
 		'head_props = {}'
 	].join(',\n\t')
 
@@ -536,9 +549,20 @@ function generate_page_component(components: Array<{ name: string; block_name: s
 	// state_referenced_locally warning, which otherwise fires for every key.
 	const head_declarations = head_keys.map((key) => `let ${key} = $derived(head_props['${key}'])`).join('\n')
 
-	const section_renders = sections.map((_, i) => {
-		return `<Section_${i} {...section_${i}_props} />`
-	}).join('\n\t\t')
+	// Same page structure as server publish: header/main/footer zones (main
+	// always, the others only when used), each section in a wrapper div.
+	const render_zone = (zone: SectionSlot['zone']) => slots
+		.map((slot, i) => ({ ...slot, i }))
+		.filter((slot) => slot.zone === zone)
+		.map(({ section, dom_id, i }) =>
+			`<div data-section="${dom_id}" id="section-${dom_id}" data-symbol="${safe_temp_id(section.block)}"><Section_${i} {...section_${i}_props} /></div>`
+		)
+		.join('\n\t')
+	const zones = (['header', 'main', 'footer'] as const)
+		.map((zone) => ({ zone, markup: render_zone(zone) }))
+		.filter(({ zone, markup }) => zone === 'main' || markup)
+		.map(({ zone, markup }) => `<${zone}>\n\t${markup}\n</${zone}>`)
+		.join('\n')
 
 	return `<script module>
 ${imports}
@@ -555,9 +579,7 @@ ${head_declarations}
 ${head_content}
 </svelte:head>
 
-<main>
-	${section_renders}
-</main>`
+${zones}`
 }
 
 function generate_error_page(site_name: string, page_name: string, error: string, head_content: string): string {

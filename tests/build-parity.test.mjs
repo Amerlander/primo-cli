@@ -13,6 +13,7 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  *   get a url pointing at the copied file, in site content and sections.
  * - Rich-text (tiptap JSON or markdown) and markdown values become HTML.
  * - Fields without a value get the server's empty value instead of undefined.
+ * - Pages use the server's markup: header/main/footer zones, section wrappers.
  */
 
 async function write_file(root, rel, content) {
@@ -253,6 +254,27 @@ describe('primo build parity', () => {
 			assert.match(html, /<a href="#"><\/a>/)
 			assert.match(html, /<p class="note">\[none\]<\/p>/)
 			assert.match(html, /<img class="card" src="" alt="One"\/?>/)
+		} finally {
+			await cleanup()
+		}
+	})
+
+	test('sections sit in header/main/footer zones and wrapper divs', async () => {
+		const { result, html, cleanup } = await build({
+			fields: '- name: headline\n  type: text\n',
+			content: 'headline: Hello\n',
+			component: '<script>let { headline } = $props()</script>\n<h1>{headline}</h1>\n',
+			async setup(site_dir) {
+				await write_file(site_dir, 'blocks/nav/component.svelte', '<nav>Nav</nav>\n')
+				await write_file(site_dir, 'page-types/default/layout.yaml', 'header:\n  - _id: navsection00001\n    block: nav\n')
+			}
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			assert.match(html, /<body id="page">/)
+			assert.match(html, /<header><div data-section="navsection00001" id="section-navsection00001" data-symbol="nav"><nav>Nav<\/nav>/)
+			assert.match(html, /<main><div data-section="section0000001" id="section-section0000001" data-symbol="hero"><h1>Hello<\/h1>/)
+			assert.doesNotMatch(html, /<footer>/, 'an unused footer zone is left out')
 		} finally {
 			await cleanup()
 		}
