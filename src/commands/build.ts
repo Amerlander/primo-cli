@@ -781,11 +781,14 @@ function safe_temp_id(value: string): string {
 	return value.replace(/[^a-zA-Z0-9_-]/g, '_') || 'page'
 }
 
+// Dotfiles (uploads/.manifest.json, .DS_Store, ...) are site metadata, not
+// assets, and are never published.
 async function copy_dir(src: string, dest: string): Promise<void> {
 	await fs.mkdir(dest, { recursive: true })
 	const entries = await fs.readdir(src, { withFileTypes: true })
 
 	for (const entry of entries) {
+		if (entry.name.startsWith('.')) continue
 		const src_path = path.join(src, entry.name)
 		const dest_path = path.join(dest, entry.name)
 

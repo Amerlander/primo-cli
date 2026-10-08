@@ -157,6 +157,26 @@ describe('primo build parity', () => {
 		}
 	})
 
+	test('upload dotfiles like the manifest are not published', async () => {
+		const { result, out_dir, cleanup } = await build({
+			fields: '- name: headline\n  type: text\n',
+			content: 'headline: Hello\n',
+			component: '<h1>{headline}</h1>\n',
+			async setup(site_dir) {
+				await write_file(site_dir, 'uploads/logo.png', 'logo')
+				await write_file(site_dir, 'uploads/.manifest.json', JSON.stringify({ 'logo.png': { id: 'hostedid0000001', hash: 'stale' } }))
+				await write_file(site_dir, 'uploads/nested/.DS_Store', 'junk')
+			}
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			const uploads_dir = path.join(out_dir, 'uploads')
+			assert.deepEqual((await fs.readdir(uploads_dir, { recursive: true })).map((file) => file.replaceAll('\\', '/')).sort(), ['logo.png', 'nested'])
+		} finally {
+			await cleanup()
+		}
+	})
+
 	test('rich-text and markdown fields reach blocks as HTML', async () => {
 		const { result, html, cleanup } = await build({
 			fields: [
