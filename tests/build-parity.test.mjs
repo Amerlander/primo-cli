@@ -9,6 +9,8 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  *
  * - Blocks may import svelte subpaths (`svelte/transition`, `svelte/store`).
  * - Blocks that don't call $props() see their fields as bare identifiers.
+ * - Image fields referencing an upload (manifest ID or `uploads/<file>`)
+ *   get a url pointing at the copied file, in site content and sections.
  */
 
 async function write_file(root, rel, content) {
@@ -85,6 +87,69 @@ describe('primo build parity', () => {
 		} finally {
 			await markup.cleanup()
 			await scripted.cleanup()
+		}
+	})
+
+	test('image uploads resolve to the copied /uploads files', async () => {
+		const { result, html, out_dir, cleanup } = await build({
+			fields: [
+				'- name: image',
+				'  type: image',
+				'- name: external',
+				'  type: image',
+				'- name: gallery',
+				'  type: repeater',
+				'  subfields:',
+				'    - name: card',
+				'      type: group',
+				'      subfields:',
+				'        - name: photo',
+				'          type: image',
+				''
+			].join('\n'),
+			content: [
+				'image:',
+				'  upload: uploads/hero shot.jpg',
+				"  url: ''",
+				'  alt: Hero',
+				'external:',
+				'  upload: hostedid0000001',
+				'  url: https://cdn.example.com/kept.png',
+				'gallery:',
+				'  - card:',
+				'      photo:',
+				'        upload: hostedid0000001',
+				"        url: ''",
+				''
+			].join('\n'),
+			component: [
+				'<script>let { image, external, gallery } = $props()</script>',
+				'<img class="hero" src={image.url} alt={image.alt}>',
+				'<img class="external" src={external.url} alt="">',
+				'{#each gallery as item}<img class="photo" src={item.card.photo.url} alt="">{/each}',
+				''
+			].join('\n'),
+			async setup(site_dir) {
+				await write_file(site_dir, 'uploads/hero shot.jpg', 'hero')
+				await write_file(site_dir, 'uploads/logo.png', 'logo')
+				await write_file(site_dir, 'uploads/.manifest.json', JSON.stringify({ 'logo.png': { id: 'hostedid0000001', hash: 'stale' } }))
+				// Site-level image, shown by a layout section through a site-field.
+				await write_file(site_dir, 'site/fields.yaml', '- name: logo\n  type: image\n')
+				await write_file(site_dir, 'site/content.yaml', "logo:\n  upload: hostedid0000001\n  url: ''\n  alt: Logo\n")
+				await write_file(site_dir, 'blocks/nav/fields.yaml', '- name: logo\n  type: site-field\n  config:\n    field: logo\n')
+				await write_file(site_dir, 'blocks/nav/component.svelte', '<script>let { logo } = $props()</script>\n<nav><img src={logo.url} alt={logo.alt}></nav>\n')
+				await write_file(site_dir, 'page-types/default/layout.yaml', 'header:\n  - block: nav\n')
+			}
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			assert.match(html, /<nav><img src="\/uploads\/logo\.png" alt="Logo"\/?><\/nav>/)
+			assert.match(html, /class="hero" src="\/uploads\/hero%20shot\.jpg" alt="Hero"/)
+			assert.match(html, /class="external" src="https:\/\/cdn\.example\.com\/kept\.png"/)
+			assert.match(html, /class="photo" src="\/uploads\/logo\.png"/)
+			await fs.access(path.join(out_dir, 'uploads', 'hero shot.jpg'))
+		} finally {
+			await cleanup()
 		}
 	})
 })

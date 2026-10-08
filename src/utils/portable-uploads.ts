@@ -106,6 +106,14 @@ async function rewrite_ids(root: string, refs: Map<string, string>, write: Write
 	for (const dir of CONTENT_DIRS) await walk(path.join(root, dir))
 }
 
+// Map each manifest upload ID to its symbolic `uploads/<file>` path on disk,
+// so content that still references uploads by ID can be resolved locally.
+export async function read_upload_paths(site_dir: string): Promise<Map<string, string>> {
+	const refs = new Map<string, string>()
+	add_refs(refs, await read_manifest(site_dir), await local_uploads(site_dir))
+	return refs
+}
+
 // Imports must leave authored names and symbolic refs intact. Recover older
 // bare IDs using the existing manifest or the response's filename/hash map.
 export async function preserve_upload_paths(site_dir: string, entries: Record<string, unknown>, write: WriteFile = write_file): Promise<void> {

@@ -8,6 +8,7 @@ import * as esbuild from 'esbuild'
 import { fileURLToPath } from 'url'
 import { read_site_config, type SiteConfig, SITE_CONFIG_FILE } from '../utils/site-config.js'
 import { validate_head_svelte_content } from '../utils/head-svelte.js'
+import { read_upload_paths } from '../utils/portable-uploads.js'
 
 // CSS reset applied to all sites by default
 const CSS_RESET = `*, *::before, *::after { box-sizing: border-box; }
@@ -62,6 +63,7 @@ interface BlockField {
 		field?: string // Backwards compatibility - name of site field
 		[key: string]: unknown
 	} | null
+	subfields?: BlockField[]
 }
 
 interface SiteField {
@@ -75,6 +77,8 @@ interface SiteField {
 interface SiteData {
 	fields: SiteField[]
 	content: Record<string, unknown>
+	// Upload ID -> symbolic `uploads/<file>` path, from uploads/.manifest.json
+	uploads: Map<string, string>
 }
 
 export async function build_site(options: BuildOptions) {
@@ -328,8 +332,9 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 		// publish. Every DEFINED field key is declared even when no value is set
 		// (binding to undefined), so `{seo_title || fallback}` works on pages
 		// that leave the field empty instead of throwing ReferenceError.
-		const head_data: Record<string, unknown> = { ...site_data.content, ...(page.fields || {}) }
 		const page_type_fields = await load_page_type_fields(site_dir, page_type)
+		const page_fields = resolve_field_values(page_type_fields, page.fields || {}, site_data)
+		const head_data: Record<string, unknown> = { ...site_data.content, ...page_fields }
 		const head_keys = head_identifier_keys([
 			...site_data.fields.map((field) => field.name),
 			...page_type_fields.map((field) => field.name),
@@ -681,7 +686,9 @@ async function resolve_layout_sections(sections: PageSection[], site_dir: string
 			content = await load_block_defaults(site_dir, section.block)
 		}
 		// Resolve any site-field references in the content
-		const resolved_content = await resolve_site_fields(site_dir, section.block, content, site_data)
+		const site_resolved = await resolve_site_fields(site_dir, section.block, content, site_data)
+		// Convert stored values (images, ...) into what the block receives
+		const resolved_content = resolve_field_values(await load_block_fields(site_dir, section.block), site_resolved, site_data)
 		// Resolve internal page: links to URLs (walks nested repeaters/groups too)
 		resolved.push({ ...section, content: resolve_links(resolved_content, page_url_map, current_page_id) as Record<string, unknown> })
 	}
@@ -701,7 +708,8 @@ async function resolve_page_sections(sections: PageSection[], site_dir: string, 
 		} else {
 			content = await load_block_defaults(site_dir, section.block)
 		}
-		const resolved_content = await resolve_site_fields(site_dir, section.block, content, site_data)
+		const site_resolved = await resolve_site_fields(site_dir, section.block, content, site_data)
+		const resolved_content = resolve_field_values(await load_block_fields(site_dir, section.block), site_resolved, site_data)
 		// Resolve internal page: links to URLs (walks nested repeaters/groups too)
 		resolved.push({ ...section, content: resolve_links(resolved_content, page_url_map, current_page_id) as Record<string, unknown> })
 	}
@@ -763,6 +771,46 @@ function resolve_links(value: unknown, page_url_map: Map<string, string>, curren
 	return value
 }
 
+function is_plain_object(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+// Convert stored field values into what blocks and head fragments receive,
+// by field type, as server publish does (see the CMS's Content.svelte.ts).
+// Walks repeater/group subfields; keys without a field definition pass
+// through unchanged. Returns new objects, never mutates `content`.
+function resolve_field_values(
+	fields: Array<SiteField | BlockField>,
+	content: Record<string, unknown>,
+	context: Pick<SiteData, 'uploads'>
+): Record<string, unknown> {
+	const resolved: Record<string, unknown> = { ...content }
+	for (const field of fields as BlockField[]) {
+		if (!field?.name || !(field.name in resolved)) continue
+		const value = resolved[field.name]
+		const subfields = Array.isArray(field.subfields) ? field.subfields : []
+		if (field.type === 'image') {
+			resolved[field.name] = resolve_image(value, context.uploads)
+		} else if (field.type === 'repeater' && Array.isArray(value)) {
+			resolved[field.name] = value.map((item) => is_plain_object(item) ? resolve_field_values(subfields, item, context) : item)
+		} else if (field.type === 'group' && is_plain_object(value)) {
+			resolved[field.name] = resolve_field_values(subfields, value, context)
+		}
+	}
+	return resolved
+}
+
+// An image's own url wins; otherwise its upload resolves to the copy of the
+// file the build writes to /uploads/. `upload` is either a manifest ID (as
+// pulled from the hosted server) or a symbolic `uploads/<file>` path.
+function resolve_image(value: unknown, uploads: Map<string, string>): unknown {
+	if (!is_plain_object(value) || (typeof value.url === 'string' && value.url)) return value
+	const upload = typeof value.upload === 'string' ? value.upload : ''
+	const upload_path = upload.startsWith('uploads/') ? upload : uploads.get(upload)
+	if (!upload_path) return value
+	return { ...value, url: `/${upload_path.split('/').map(encodeURIComponent).join('/')}` }
+}
+
 async function load_block_defaults(site_dir: string, block_name: string): Promise<Record<string, unknown>> {
 	const content_path = path.join(site_dir, 'blocks', block_name, 'content.yaml')
 	try {
@@ -814,7 +862,15 @@ async function load_site_data(site_dir: string): Promise<SiteData> {
 		// No site content defined
 	}
 
-	return { fields, content }
+	// Images referencing uploads by ID resolve through the manifest. Without a
+	// readable one only symbolic `uploads/<file>` references resolve.
+	let uploads = new Map<string, string>()
+	try {
+		uploads = await read_upload_paths(site_dir)
+	} catch (error) {
+		console.log(chalk.yellow(`  Warning: could not read uploads/.manifest.json: ${error instanceof Error ? error.message : error}`))
+	}
+	return { fields, content: resolve_field_values(fields, content, { uploads }), uploads }
 }
 
 async function load_block_fields(site_dir: string, block_name: string): Promise<BlockField[]> {
