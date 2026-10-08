@@ -14,6 +14,8 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  *   Upload dotfiles (the manifest) are not published.
  * - Rich-text (tiptap JSON or markdown) and markdown values become HTML.
  * - Fields without a value get the server's empty value instead of undefined.
+ * - Image fields get the server's `focal_point` and CSS `position`, clamped
+ *   and centered by default, also on empty values.
  * - Pages use the server's markup: header/main/footer zones, section wrappers.
  * - The page type's foot.html follows site/foot.html, verbatim.
  * - Blocks with a script get a /_symbols bundle and are hydrated on the page.
@@ -280,6 +282,54 @@ describe('primo build parity', () => {
 			assert.match(html, /<a href="#"><\/a>/)
 			assert.match(html, /<p class="note">\[none\]<\/p>/)
 			assert.match(html, /<img class="card" src="" alt="One"\/?>/)
+		} finally {
+			await cleanup()
+		}
+	})
+
+	test('image fields get focal_point and position like server publish', async () => {
+		const { result, html, cleanup } = await build({
+			fields: [
+				'- name: focused',
+				'  type: image',
+				'- name: plain',
+				'  type: image',
+				'- name: clamped',
+				'  type: image',
+				'- name: blank',
+				'  type: image',
+				'- name: missing',
+				'  type: image',
+				''
+			].join('\n'),
+			content: [
+				'focused:',
+				'  url: https://example.com/a.jpg',
+				'  focal_point: { x: 0.375, y: 0.62 }',
+				'plain:',
+				'  url: https://example.com/b.jpg',
+				'clamped:',
+				'  url: https://example.com/c.jpg',
+				'  focal_point: { x: -0.4, y: 1.7 }',
+				'blank: null',
+				''
+			].join('\n'),
+			component: [
+				'<script>let { focused, plain, clamped, blank, missing } = $props()</script>',
+				'{#each [focused, plain, clamped, blank, missing] as image}<p class="pos">{image.position}|{image.focal_point.x},{image.focal_point.y}</p>{/each}',
+				''
+			].join('\n')
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			const positions = [...html.matchAll(/<p class="pos">([^<]*)<\/p>/g)].map((match) => match[1])
+			assert.deepEqual(positions, [
+				'37.5% 62%|0.375,0.62',
+				'50% 50%|0.5,0.5',
+				'0% 100%|0,1',
+				'50% 50%|0.5,0.5',
+				'50% 50%|0.5,0.5'
+			])
 		} finally {
 			await cleanup()
 		}

@@ -1048,7 +1048,7 @@ function resolve_page_field(field: BlockField, context: FieldContext): unknown {
 // server passes an empty tiptap doc object.
 function empty_field_value(field: BlockField): unknown {
 	switch (field.type) {
-		case 'image': return { url: '', src: '', alt: '', size: null, width: null, height: null }
+		case 'image': return { url: '', src: '', alt: '', size: null, width: null, height: null, focal_point: { x: 0.5, y: 0.5 }, position: '50% 50%' }
 		case 'link': return { url: '', label: '', text: '', active: false }
 		case 'repeater': return []
 		case 'group': return {}
@@ -1066,13 +1066,31 @@ function empty_field_value(field: BlockField): unknown {
 // An image's own url wins; otherwise its upload resolves to the copy of the
 // file the build writes to /_uploads/. `upload` is either a manifest ID (as
 // pulled from the hosted server) or a symbolic `uploads/<file>` path.
+// Like the server, every image also gets its focal point and the matching
+// CSS `position`; a value that isn't an object gets the empty value.
 function resolve_image(value: unknown, uploads: Map<string, string>): unknown {
-	if (!is_plain_object(value) || (typeof value.url === 'string' && value.url)) return value
+	if (!is_plain_object(value)) return empty_field_value({ name: '', type: 'image' })
+	const focal_point = get_focal_point(value)
+	const resolved = { ...value, focal_point, position: get_focal_position(focal_point) }
+	if (typeof value.url === 'string' && value.url) return resolved
 	const upload = typeof value.upload === 'string' ? value.upload : ''
 	const upload_path = upload.startsWith('uploads/') ? upload : uploads.get(upload)
-	if (!upload_path) return value
+	if (!upload_path) return resolved
 	const file = upload_path.slice('uploads/'.length)
-	return { ...value, url: `/${UPLOADS_DIR}/${file.split('/').map(encodeURIComponent).join('/')}` }
+	return { ...resolved, url: `/${UPLOADS_DIR}/${file.split('/').map(encodeURIComponent).join('/')}` }
+}
+
+// Mirror the CMS's get_focal_point / get_focal_position (builder/utils.ts):
+// fractions clamped to 0..1 and rounded to 3 decimals, missing or malformed
+// coordinates are centered; `position` is e.g. "37.5% 62%".
+function get_focal_point(value: Record<string, unknown>): { x: number; y: number } {
+	const point = is_plain_object(value.focal_point) ? value.focal_point : undefined
+	const fraction = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? Math.round(Math.min(1, Math.max(0, n)) * 1000) / 1000 : 0.5)
+	return { x: fraction(point?.x), y: fraction(point?.y) }
+}
+
+function get_focal_position({ x, y }: { x: number; y: number }): string {
+	return `${Math.round(x * 1000) / 10}% ${Math.round(y * 1000) / 10}%`
 }
 
 async function load_block_defaults(site_dir: string, block_name: string): Promise<Record<string, unknown>> {
