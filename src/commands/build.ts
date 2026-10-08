@@ -10,14 +10,11 @@ import { read_site_config, type SiteConfig, SITE_CONFIG_FILE } from '../utils/si
 import { validate_head_svelte_content } from '../utils/head-svelte.js'
 import { read_upload_paths } from '../utils/portable-uploads.js'
 import { markdown_to_html, rich_text_to_html } from '../utils/rich-text.js'
+import { PRIMO_BASELINE_CSS } from '../utils/baseline-css.js'
 
-// CSS reset applied to all sites by default
-const CSS_RESET = `*, *::before, *::after { box-sizing: border-box; }
-* { margin: 0; }
-body { line-height: 1.5; -webkit-font-smoothing: antialiased; }
-img, picture, video, canvas, svg { display: block; max-width: 100%; }
-input, button, textarea, select { font: inherit; }
-p, h1, h2, h3, h4, h5, h6 { overflow-wrap: break-word; }`
+// Start of every page's <head>, as server publish emits it
+const HEAD_START = '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="Primo" />'
+const BASELINE_STYLE = `<style data-primo-baseline>${PRIMO_BASELINE_CSS}</style>`
 
 // Output directory for uploads, same as server publish (sites/<host>/_uploads)
 const UPLOADS_DIR = '_uploads'
@@ -486,17 +483,14 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 		}
 
 		// Head <style> tags flow through rendered.head as real global style
-		// elements (matching server publish). Reset first so head styles can
+		// elements (matching server publish). Baseline first so head styles can
 		// override it; block CSS last, as component styles land during render.
 		const block_css = all_css.filter(Boolean).join('\n')
 		const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
-	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<style>
-${CSS_RESET}
-	</style>
+	${HEAD_START}
+	${BASELINE_STYLE}
 	${rendered.head || ''}
 ${block_css ? `	<style>\n${block_css}\n	</style>\n` : ''}</head>
 <body id="page">
@@ -714,11 +708,10 @@ function generate_error_page(site_name: string, page_name: string, error: string
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
-	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	${HEAD_START}
+	${BASELINE_STYLE}
 	<title>${escape_html(title)}</title>
 	<style>
-${CSS_RESET}
 ${head_css}
 	</style>
 </head>

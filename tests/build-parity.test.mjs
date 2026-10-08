@@ -337,6 +337,29 @@ describe('primo build parity', () => {
 		}
 	})
 
+	test('pages start with the head and baseline CSS server publish emits', async () => {
+		const { result, html, cleanup } = await build({
+			fields: '- name: headline\n  type: text\n',
+			content: 'headline: Hello\n',
+			component: '<h1>{headline}</h1>\n'
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			const head = html.match(/<head>\s*([\s\S]*?)<\/head>/)[1]
+			assert.ok(head.startsWith(
+				'<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="Primo" />'
+			), head)
+			const baseline = head.match(/<style data-primo-baseline>([\s\S]*?)<\/style>/)
+			assert.ok(baseline, 'no baseline style')
+			assert.match(baseline[1], /:root \{\n {4}font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;/)
+			assert.match(baseline[1], /a \{\n {4}color: inherit;\n {2}\}\n$/)
+			assert.doesNotMatch(head, /overflow-wrap/, 'the old CLI-only reset is gone')
+			assert.ok(head.indexOf('data-primo-baseline') < head.indexOf('<title>Fixture</title>'), 'baseline precedes the site head')
+		} finally {
+			await cleanup()
+		}
+	})
+
 	test('page, page-list and page-field fields resolve like server publish', async () => {
 		const { result, html: raw, cleanup } = await build({
 			fields: [
