@@ -11,6 +11,7 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  * - Blocks that don't call $props() see their fields as bare identifiers.
  * - Image fields referencing an upload (manifest ID or `uploads/<file>`)
  *   get a url pointing at the copied file, in site content and sections.
+ * - Rich-text (tiptap JSON or markdown) and markdown values become HTML.
  */
 
 async function write_file(root, rel, content) {
@@ -148,6 +149,64 @@ describe('primo build parity', () => {
 			assert.match(html, /class="external" src="https:\/\/cdn\.example\.com\/kept\.png"/)
 			assert.match(html, /class="photo" src="\/uploads\/logo\.png"/)
 			await fs.access(path.join(out_dir, 'uploads', 'hero shot.jpg'))
+		} finally {
+			await cleanup()
+		}
+	})
+
+	test('rich-text and markdown fields reach blocks as HTML', async () => {
+		const { result, html, cleanup } = await build({
+			fields: [
+				'- name: body',
+				'  type: rich-text',
+				'- name: intro',
+				'  type: rich-text',
+				'- name: notes',
+				'  type: markdown',
+				'- name: items',
+				'  type: repeater',
+				'  subfields:',
+				'    - name: text',
+				'      type: rich-text',
+				''
+			].join('\n'),
+			content: [
+				'body:',
+				'  type: doc',
+				'  content:',
+				'    - type: heading',
+				'      attrs: { level: 2 }',
+				'      content: [{ type: text, text: Title }]',
+				'    - type: paragraph',
+				'      content:',
+				'        - type: text',
+				'          text: a < b',
+				'          marks: [{ type: bold }, { type: link, attrs: { href: "https://example.com/?a=1&b=2" } }]',
+				'        - type: hardBreak',
+				'intro: "Plain *markdown*"',
+				'notes: "**md** text"',
+				'items:',
+				'  - text: { type: doc, content: [{ type: paragraph, content: [{ type: text, text: Nested }] }] }',
+				''
+			].join('\n'),
+			component: [
+				'<script>let { body, intro, notes, items } = $props()</script>',
+				'<div class="body">{@html body}</div>',
+				'<div class="intro">{@html intro}</div>',
+				'<div class="notes">{@html notes}</div>',
+				'{#each items as item}<div class="item">{@html item.text}</div>{/each}',
+				''
+			].join('\n')
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			assert.doesNotMatch(html, /\[object Object\]/)
+			assert.ok(html.includes(
+				'<h2>Title</h2><p><a target="_blank" rel="noopener noreferrer nofollow" href="https://example.com/?a=1&amp;b=2"><strong>a &lt; b</strong></a><br></p>'
+			), html)
+			assert.match(html, /<p>Plain <em>markdown<\/em><\/p>/)
+			assert.match(html, /<p><strong>md<\/strong> text<\/p>/)
+			assert.match(html, /<div class="item"><!---->?<p>Nested<\/p>/)
 		} finally {
 			await cleanup()
 		}
