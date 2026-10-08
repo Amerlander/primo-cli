@@ -414,12 +414,7 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 			platform: 'node',
 			outfile: bundle_path,
 			logLevel: 'silent',
-			alias: {
-				'svelte/internal/server': path.join(svelte_base, 'src/internal/server/index.js'),
-				'svelte/internal/shared': path.join(svelte_base, 'src/internal/shared/index.js'),
-				'svelte/internal/client': path.join(svelte_base, 'src/internal/client/index.js'),
-				'svelte': path.join(svelte_base, 'src/index.js')
-			}
+			plugins: [svelte_resolver(svelte_base)]
 		})
 
 		// Import and render
@@ -885,6 +880,26 @@ async function resolve_site_fields(
 	}
 
 	return resolved
+}
+
+// Pin every `svelte` and `svelte/*` import (compiler output and block code
+// like `svelte/transition`) to the CLI's own svelte, resolved through its
+// package.json exports for the bundle's platform. Hardcoded file aliases broke
+// on svelte 5, which has no src/index.js, and mangled subpath imports.
+function svelte_resolver(svelte_base: string): esbuild.Plugin {
+	return {
+		name: 'primo-svelte',
+		setup(build) {
+			build.onResolve({ filter: /^svelte(\/|$)/ }, (args) => {
+				if (args.pluginData?.primo_svelte) return undefined
+				return build.resolve(args.path, {
+					kind: args.kind,
+					resolveDir: path.dirname(svelte_base),
+					pluginData: { primo_svelte: true }
+				})
+			})
+		}
+	}
 }
 
 async function find_svelte_path(): Promise<string> {
