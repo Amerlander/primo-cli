@@ -75,11 +75,32 @@ interface SiteField {
 	label?: string
 }
 
-interface SiteData {
+interface SiteData extends FieldContext {
 	fields: SiteField[]
 	content: Record<string, unknown>
+}
+
+// A page as page/page-list fields see it. Pages are kept in the order push
+// creates them (sorted file paths), which is the order the CMS lists them in.
+interface SitePage {
+	id?: string
+	name: string
+	page_path: string
+	page_type: string
+	fields: Record<string, unknown>
+}
+
+// What field values are resolved against.
+interface FieldContext {
 	// Upload ID -> symbolic `uploads/<file>` path, from uploads/.manifest.json
 	uploads: Map<string, string>
+	pages: SitePage[]
+	// Page type folder -> its config _id and field definitions
+	page_types: Map<string, { id?: string; fields: BlockField[] }>
+	// Resolved fields per referenced page, shared by all page/page-list fields
+	page_content: Map<string, Record<string, unknown> | undefined>
+	// Resolved fields of the page being rendered, read by page-field fields
+	current_page?: Record<string, unknown>
 }
 
 export async function build_site(options: BuildOptions) {
@@ -131,9 +152,12 @@ export async function build_site(options: BuildOptions) {
 			}
 		}
 
-		// Find all pages
+		// Find all pages, in the order push creates them
 		const pages_dir = path.join(site_dir, 'pages')
-		const page_files = await find_pages(pages_dir)
+		const page_files = (await find_pages(pages_dir))
+			.map((file) => ({ file, key: path.relative(pages_dir, file).replaceAll('\\', '/') }))
+			.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+			.map(({ file }) => file)
 
 		// Map each page's _id to its live URL so internal `page:` links resolve.
 		// The URL is derived from the page's file location (same convention the
@@ -156,8 +180,8 @@ export async function build_site(options: BuildOptions) {
 		// string = no head.svelte for that page type).
 		const page_type_head_cache = new Map<string, string>()
 
-		// Load site data (fields and content)
-		const site_data = await load_site_data(site_dir)
+		// Load site data (fields, content, pages and page types)
+		const site_data = await load_site_data(site_dir, page_files)
 
 		// Build each page
 		const failed_pages: Array<{ name: string; error: string }> = []
@@ -328,11 +352,17 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 		const page_type_head = await load_page_type_head(site_dir, page_type, page_type_head_cache)
 		const combined_head_content = page_type_head ? `${head_content}\n${page_type_head}` : head_content
 
+		// The page's own fields, which page-field fields in every section
+		// (layout ones included) read, as on server publish
+		const page_type_fields = await load_page_type_fields(site_dir, page_type)
+		const page_fields = resolve_field_values(page_type_fields, page.fields || {}, site_data)
+		const section_data: SiteData = { ...site_data, current_page: page_fields }
+
 		// Combine header + page sections + footer
 		const current_page_id = page._id || page.id
-		const header_sections = await resolve_layout_sections(layout.header || [], site_dir, site_data, page_url_map, current_page_id)
-		const footer_sections = await resolve_layout_sections(layout.footer || [], site_dir, site_data, page_url_map, current_page_id)
-		const page_sections = await resolve_page_sections(page.sections || [], site_dir, site_data, page_url_map, current_page_id)
+		const header_sections = await resolve_layout_sections(layout.header || [], site_dir, section_data, page_url_map, current_page_id)
+		const footer_sections = await resolve_layout_sections(layout.footer || [], site_dir, section_data, page_url_map, current_page_id)
+		const page_sections = await resolve_page_sections(page.sections || [], site_dir, section_data, page_url_map, current_page_id)
 		const sections = [...header_sections, ...page_sections, ...footer_sections]
 		const section_slots = get_section_slots([
 			...header_sections.map((section) => ({ section, zone: 'header' as const })),
@@ -345,8 +375,6 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 		// publish. Every DEFINED field key is declared even when no value is set
 		// (binding to undefined), so `{seo_title || fallback}` works on pages
 		// that leave the field empty instead of throwing ReferenceError.
-		const page_type_fields = await load_page_type_fields(site_dir, page_type)
-		const page_fields = resolve_field_values(page_type_fields, page.fields || {}, site_data)
 		const head_data: Record<string, unknown> = { ...site_data.content, ...page_fields }
 		const head_keys = head_identifier_keys([
 			...site_data.fields.map((field) => field.name),
@@ -892,11 +920,18 @@ function is_plain_object(value: unknown): value is Record<string, unknown> {
 function resolve_field_values(
 	fields: Array<SiteField | BlockField>,
 	content: Record<string, unknown>,
-	context: Pick<SiteData, 'uploads'>
+	context: FieldContext
 ): Record<string, unknown> {
 	const resolved: Record<string, unknown> = { ...content }
 	for (const field of fields as BlockField[]) {
 		if (!field?.name) continue
+		// Derived from other pages, never from a stored value
+		if (field.type === 'page-list' || field.type === 'page-field') {
+			const value = field.type === 'page-list' ? resolve_page_list(field, context) : resolve_page_field(field, context)
+			if (value === undefined) delete resolved[field.name]
+			else resolved[field.name] = value
+			continue
+		}
 		if (resolved[field.name] === undefined) {
 			const empty = empty_field_value(field)
 			if (empty !== undefined) resolved[field.name] = empty
@@ -910,6 +945,11 @@ function resolve_field_values(
 			resolved[field.name] = rich_text_to_html(value)
 		} else if (field.type === 'markdown' && typeof value === 'string') {
 			resolved[field.name] = markdown_to_html(value)
+		} else if (field.type === 'page') {
+			const page = typeof value === 'string' ? context.pages.find((candidate) => candidate.id === value) : undefined
+			const page_value = page && resolve_page_reference(page, context)
+			if (page_value === undefined) delete resolved[field.name]
+			else resolved[field.name] = page_value
 		} else if (field.type === 'repeater' && Array.isArray(value)) {
 			resolved[field.name] = value.map((item) => is_plain_object(item) ? resolve_field_values(subfields, item, context) : item)
 		} else if (field.type === 'group' && is_plain_object(value)) {
@@ -919,10 +959,64 @@ function resolve_field_values(
 	return resolved
 }
 
+// A referenced page as server publish passes it: the page's resolved fields
+// plus _meta. created_at has no source in site files and stays unset.
+// Undefined for a page that (indirectly) references itself.
+function resolve_page_reference(page: SitePage, context: FieldContext): Record<string, unknown> | undefined {
+	const key = page.id || `/${page.page_path}`
+	if (!context.page_content.has(key)) {
+		context.page_content.set(key, undefined)
+		const fields = context.page_types.get(page.page_type)?.fields || []
+		context.page_content.set(key, resolve_field_values(fields, page.fields, { ...context, current_page: undefined }))
+	}
+	const data = context.page_content.get(key)
+	if (!data) return undefined
+	return {
+		...data,
+		_meta: {
+			created_at: undefined,
+			name: page.name,
+			slug: page.page_path.split('/').pop() || '',
+			url: page.page_path === '' ? '/' : `/${page.page_path}`
+		}
+	}
+}
+
+// Every page of the configured page type (its folder name, or its _id).
+function resolve_page_list(field: BlockField, context: FieldContext): unknown[] | undefined {
+	const ref = field.config?.page_type
+	if (typeof ref !== 'string' || !ref) return undefined
+	const folder = context.page_types.has(ref) ? ref : [...context.page_types].find(([, page_type]) => page_type.id === ref)?.[0]
+	if (!folder) return undefined
+	const pages = context.pages.filter((page) => page.page_type === folder).map((page) => resolve_page_reference(page, context))
+	// Like the server: no pages leaves the field unset
+	return pages.length > 0 && pages.every(Boolean) ? pages : undefined
+}
+
+// A page type field, read from the page being rendered (or its empty value).
+// The reference is `<page-type-folder>--<field-key>`, a field _id, or a bare
+// key only one page type defines.
+function resolve_page_field(field: BlockField, context: FieldContext): unknown {
+	const ref = field.config?.field
+	if (typeof ref !== 'string' || !ref || !context.current_page) return undefined
+	let page_field: BlockField | undefined
+	const separator = ref.indexOf('--')
+	if (separator >= 0) {
+		const key = ref.slice(separator + 2)
+		page_field = context.page_types.get(ref.slice(0, separator))?.fields.find((candidate) => candidate.name === key)
+	} else {
+		const all_fields = [...context.page_types.values()].flatMap((page_type) => page_type.fields)
+		const by_key = all_fields.filter((candidate) => candidate.name === ref)
+		page_field = all_fields.find((candidate) => get_field_id(candidate) === ref) ?? (by_key.length === 1 ? by_key[0] : undefined)
+	}
+	if (!page_field?.name) return undefined
+	return context.current_page[page_field.name] ?? empty_field_value(page_field)
+}
+
 // What server publish hands a block for a field with no value, so blocks can
-// read e.g. `image.url` on any section. Site/page references are resolved
-// elsewhere (or not at all) and stay undefined. An empty rich-text field is
-// '' here; the server passes an empty tiptap doc object.
+// read e.g. `image.url` on any section. Site references are resolved
+// elsewhere and stay undefined. An empty rich-text field is '' here; the
+// server passes an empty tiptap doc object.
 function empty_field_value(field: BlockField): unknown {
 	switch (field.type) {
 		case 'image': return { url: '', src: '', alt: '', size: null, width: null, height: null }
@@ -932,9 +1026,9 @@ function empty_field_value(field: BlockField): unknown {
 		case 'switch': return true
 		case 'number': return 0
 		case 'info': return null
+		case 'page': return null
 		case 'site-field':
 		case 'page-field':
-		case 'page':
 		case 'page-list': return undefined
 		default: return ''
 	}
@@ -982,7 +1076,7 @@ function get_field_id(field: { id?: string; _id?: string }): string | undefined 
 	return field._id || field.id
 }
 
-async function load_site_data(site_dir: string): Promise<SiteData> {
+async function load_site_data(site_dir: string, page_files: string[]): Promise<SiteData> {
 	const fields_path = path.join(site_dir, 'site', 'fields.yaml')
 	const content_path = path.join(site_dir, 'site', 'content.yaml')
 
@@ -1010,7 +1104,44 @@ async function load_site_data(site_dir: string): Promise<SiteData> {
 	} catch (error) {
 		console.log(chalk.yellow(`  Warning: could not read uploads/.manifest.json: ${error instanceof Error ? error.message : error}`))
 	}
-	return { fields, content: resolve_field_values(fields, content, { uploads }), uploads }
+	const page_types = new Map<string, { id?: string; fields: BlockField[] }>()
+	let page_type_folders: string[] = []
+	try {
+		page_type_folders = (await fs.readdir(path.join(site_dir, 'page-types'), { withFileTypes: true }))
+			.filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+			.map((entry) => entry.name)
+	} catch {
+		// No page types
+	}
+	for (const folder of page_type_folders) {
+		let id: string | undefined
+		try {
+			const config = load_yaml(await fs.readFile(path.join(site_dir, 'page-types', folder, 'config.yaml'), 'utf-8')) as { _id?: unknown } | null
+			if (typeof config?._id === 'string' && config._id) id = config._id
+		} catch {
+			// No config; the folder name still identifies the page type
+		}
+		page_types.set(folder, { id, fields: await load_page_type_fields(site_dir, folder) })
+	}
+
+	const pages: SitePage[] = []
+	for (const page_file of page_files) {
+		try {
+			const page = load_yaml(await fs.readFile(page_file, 'utf-8')) as Page
+			pages.push({
+				id: page._id || page.id,
+				name: page.name,
+				page_path: get_page_path_from_file(site_dir, page_file),
+				page_type: page.page_type || 'default',
+				fields: is_plain_object(page.fields) ? page.fields : {}
+			})
+		} catch {
+			// Unparseable page files surface when that page is built
+		}
+	}
+
+	const context: FieldContext = { uploads, pages, page_types, page_content: new Map() }
+	return { ...context, fields, content: resolve_field_values(fields, content, context) }
 }
 
 async function load_block_fields(site_dir: string, block_name: string): Promise<BlockField[]> {

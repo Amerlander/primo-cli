@@ -312,4 +312,63 @@ describe('primo build parity', () => {
 			await cleanup()
 		}
 	})
+
+	test('page, page-list and page-field fields resolve like server publish', async () => {
+		const { result, html: raw, cleanup } = await build({
+			fields: [
+				'- name: featured',
+				'  type: page',
+				'- name: none',
+				'  type: page',
+				'- name: posts',
+				'  type: page-list',
+				'  config:',
+				'    page_type: post',
+				'- name: heading',
+				'  type: page-field',
+				'  config:',
+				'    field: default--headline',
+				'- name: missing',
+				'  type: page-field',
+				'  config:',
+				'    field: default--subtitle',
+				''
+			].join('\n'),
+			content: 'featured: postaaaaaaaaaa1\n',
+			component: [
+				'<script>let { featured, none, posts, heading, missing } = $props()</script>',
+				'<h1>{heading}</h1>',
+				'<p class="featured">{featured.title}|{@html featured.summary}|{featured._meta.name}|{featured._meta.slug}|{featured._meta.url}</p>',
+				'<ul>{#each posts as post}<li><a href={post._meta.url}>{post.title}</a></li>{/each}</ul>',
+				'<p class="empty">{String(none)}|[{missing}]</p>',
+				''
+			].join('\n'),
+			async setup(site_dir) {
+				await write_file(site_dir, 'page-types/default/fields.yaml', '- name: headline\n  type: text\n- name: subtitle\n  type: text\n')
+				await write_file(site_dir, 'page-types/post/config.yaml', 'name: Post\n')
+				await write_file(site_dir, 'page-types/post/fields.yaml', '- name: title\n  type: text\n- name: summary\n  type: markdown\n')
+				// Names sort the other way round: the list follows file order.
+				await write_file(site_dir, 'pages/blog/first.yaml', 'name: Zeta\n_id: postaaaaaaaaaa1\npage_type: post\nfields:\n  title: First post\n  summary: "**one**"\nsections: []\n')
+				await write_file(site_dir, 'pages/blog/second.yaml', 'name: Alpha\n_id: postbbbbbbbbbb2\npage_type: post\nfields:\n  title: Second post\nsections: []\n')
+				const index = await fs.readFile(path.join(site_dir, 'pages/index.yaml'), 'utf8')
+				await write_file(site_dir, 'pages/index.yaml', index.replace('fields: {}', 'fields:\n  headline: Welcome'))
+				// Layout sections read page fields from the page being rendered.
+				await write_file(site_dir, 'blocks/nav/fields.yaml', '- name: heading\n  type: page-field\n  config:\n    field: default--headline\n')
+				await write_file(site_dir, 'blocks/nav/component.svelte', '<script>let { heading } = $props()</script>\n<nav>{heading}</nav>\n')
+				await write_file(site_dir, 'page-types/default/layout.yaml', 'header:\n  - block: nav\n')
+			}
+		})
+		// Hydration markers aside
+		const html = raw.replace(/<!--.*?-->/g, '')
+		try {
+			assert.equal(result.code, 0, result.output)
+			assert.match(html, /<nav>Welcome<\/nav>/)
+			assert.match(html, /<h1>Welcome<\/h1>/)
+			assert.match(html, /<p class="featured">First post\|<p><strong>one<\/strong><\/p>\s*\|Zeta\|first\|\/blog\/first<\/p>/)
+			assert.match(html, /<ul><li><a href="\/blog\/first">First post<\/a><\/li><li><a href="\/blog\/second">Second post<\/a><\/li><\/ul>/)
+			assert.match(html, /<p class="empty">null\|\[\]<\/p>/)
+		} finally {
+			await cleanup()
+		}
+	})
 })
