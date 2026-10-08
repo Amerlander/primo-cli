@@ -14,6 +14,7 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  * - Rich-text (tiptap JSON or markdown) and markdown values become HTML.
  * - Fields without a value get the server's empty value instead of undefined.
  * - Pages use the server's markup: header/main/footer zones, section wrappers.
+ * - Blocks with a script get a /_symbols bundle and are hydrated on the page.
  */
 
 async function write_file(root, rel, content) {
@@ -275,6 +276,38 @@ describe('primo build parity', () => {
 			assert.match(html, /<header><div data-section="navsection00001" id="section-navsection00001" data-symbol="nav"><nav>Nav<\/nav>/)
 			assert.match(html, /<main><div data-section="section0000001" id="section-section0000001" data-symbol="hero"><h1>Hello<\/h1>/)
 			assert.doesNotMatch(html, /<footer>/, 'an unused footer zone is left out')
+		} finally {
+			await cleanup()
+		}
+	})
+
+	test('blocks with a script ship a client bundle and are hydrated', async () => {
+		const { result, html, out_dir, cleanup } = await build({
+			fields: '- name: headline\n  type: text\n',
+			content: 'headline: "</script><b>"\n',
+			component: [
+				'<script>',
+				"import { fade } from 'svelte/transition'",
+				'let open = $state(false)',
+				'</script>',
+				'<h1>{headline}</h1><button onclick={() => (open = !open)}>Toggle</button>',
+				'{#if open}<p transition:fade>Open</p>{/if}',
+				''
+			].join('\n'),
+			async setup(site_dir) {
+				await write_file(site_dir, 'blocks/nav/component.svelte', '<nav>Nav</nav>\n')
+				await write_file(site_dir, 'page-types/default/layout.yaml', 'header:\n  - block: nav\n')
+			}
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)
+			assert.ok(script, 'page has no hydration script')
+			assert.match(script[1], /import\('\/_symbols\/hero\.js'\)\.then\(\(\{ default: App, hydrate \}\) => \{hydrate\(App, \{ target: document\.querySelector\('#section-section0000001'\), props: \{"headline":"\\u003c\/script>\\u003cb>"\} \}\);\}\)/)
+			assert.doesNotMatch(script[1], /nav\.js/, 'a block without a script must not ship JS')
+			const bundle = await fs.readFile(path.join(out_dir, '_symbols', 'hero.js'), 'utf8')
+			assert.match(bundle, /export\s*\{[^}]*\bhydrate\b[^}]*\}/)
+			await assert.rejects(fs.access(path.join(out_dir, '_symbols', 'nav.js')))
 		} finally {
 			await cleanup()
 		}

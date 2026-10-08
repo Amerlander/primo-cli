@@ -146,6 +146,9 @@ export async function build_site(options: BuildOptions) {
 		// Compile all blocks once and cache them
 		const block_cache = new Map<string, { js: string; css: string }>()
 
+		// Per block: whether it ships a client bundle in _symbols/
+		const client_cache = new Map<string, boolean>()
+
 		// Cache layouts per page type
 		const layout_cache = new Map<string, Layout>()
 
@@ -170,10 +173,12 @@ export async function build_site(options: BuildOptions) {
 				page_path,
 				site_dir,
 				temp_dir,
+				output_dir,
 				head_content,
 				foot_content,
 				site_name: config.name,
 				block_cache,
+				client_cache,
 				layout_cache,
 				page_type_head_cache,
 				site_data,
@@ -249,10 +254,12 @@ interface BuildPageOptions {
 	page_path: string
 	site_dir: string
 	temp_dir: string
+	output_dir: string
 	head_content: string
 	foot_content: string
 	site_name: string
 	block_cache: Map<string, { js: string; css: string }>
+	client_cache: Map<string, boolean>
 	layout_cache: Map<string, Layout>
 	page_type_head_cache: Map<string, string>
 	site_data: SiteData
@@ -303,7 +310,7 @@ async function load_page_type_head(
 }
 
 async function build_page(options: BuildPageOptions): Promise<{ html: string; error?: string }> {
-	const { page, page_path, site_dir, temp_dir, head_content, foot_content, site_name, block_cache, layout_cache, page_type_head_cache, site_data, page_url_map } = options
+	const { page, page_path, site_dir, temp_dir, output_dir, head_content, foot_content, site_name, block_cache, client_cache, layout_cache, page_type_head_cache, site_data, page_url_map } = options
 
 	try {
 		const page_build_id = safe_temp_id(page._id || page.id || page_path || page.name || 'page')
@@ -434,6 +441,10 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 
 		const rendered = render(PageComponent, { props })
 
+		// Interactive blocks get a client bundle and hydrate in place, as on
+		// server publish. Blocks without a script ship no JavaScript.
+		const hydration_script = await generate_hydration_script(section_slots, { site_dir, temp_dir, output_dir, client_cache, svelte_base })
+
 		// No automatic <title> — server publish emits none, and an injected
 		// title would suppress any title a page-type head renders (Svelte keeps
 		// the first <title> it encounters). Warn so the omission is visible.
@@ -457,7 +468,7 @@ ${CSS_RESET}
 ${block_css ? `	<style>\n${block_css}\n	</style>\n` : ''}</head>
 <body id="page">
 ${rendered.body || ''}
-${foot_content}</body>
+${hydration_script}${foot_content}</body>
 </html>`
 
 		return { html }
@@ -475,8 +486,7 @@ async function compile_block(site_dir: string, block_name: string, temp_dir: str
 	const component_path = path.join(site_dir, 'blocks', block_name, 'component.svelte')
 
 	try {
-		const fields = await load_block_fields(site_dir, block_name)
-		const source = inject_field_props(await fs.readFile(component_path, 'utf-8'), fields.map((field) => field.name))
+		const source = await read_block_source(site_dir, block_name)
 
 		// Compile with Svelte
 		const compiled = compile(source, {
@@ -498,6 +508,82 @@ async function compile_block(site_dir: string, block_name: string, temp_dir: str
 		console.log(chalk.yellow(`  Warning: Could not compile block "${block_name}": ${error}`))
 		return { js: '', css: '' }
 	}
+}
+
+async function read_block_source(site_dir: string, block_name: string): Promise<string> {
+	const component_path = path.join(site_dir, 'blocks', block_name, 'component.svelte')
+	const fields = await load_block_fields(site_dir, block_name)
+	return inject_field_props(await fs.readFile(component_path, 'utf-8'), fields.map((field) => field.name))
+}
+
+interface ClientBuildOptions {
+	site_dir: string
+	temp_dir: string
+	output_dir: string
+	client_cache: Map<string, boolean>
+	svelte_base: string
+}
+
+// The module script server publish appends to the body: import each
+// interactive block's bundle once and hydrate every section using it, with
+// the same props the section was rendered with.
+async function generate_hydration_script(slots: SectionSlot[], options: ClientBuildOptions): Promise<string> {
+	const imports: string[] = []
+	for (const block_name of new Set(slots.map(({ section }) => section.block))) {
+		let has_js = options.client_cache.get(block_name)
+		if (has_js === undefined) {
+			has_js = await bundle_block_client(block_name, options)
+			options.client_cache.set(block_name, has_js)
+		}
+		if (!has_js) continue
+		const hydrations = slots
+			.filter(({ section }) => section.block === block_name)
+			.map(({ section, dom_id }) =>
+				`hydrate(App, { target: document.querySelector('#section-${dom_id}'), props: ${script_json(section.content || {})} });`
+			)
+			.join('')
+		imports.push(`import('/_symbols/${encodeURIComponent(block_name)}.js').then(({ default: App, hydrate }) => {${hydrations}}).catch(e => console.error(e));`)
+	}
+	return imports.length > 0 ? `<script type="module">${imports.join('')}</script>\n` : ''
+}
+
+// Compile a block for the browser and bundle it with the svelte runtime
+// into _symbols/<block>.js, exporting the component and `hydrate` like the
+// server's symbol modules. Returns false for blocks without a script, which
+// server publish doesn't hydrate either.
+async function bundle_block_client(block_name: string, options: ClientBuildOptions): Promise<boolean> {
+	const component_path = path.join(options.site_dir, 'blocks', block_name, 'component.svelte')
+	const script = (await fs.readFile(component_path, 'utf-8')).match(/<script[^>]*>([\s\S]*?)<\/script>/)
+	if (!script?.[1].trim()) return false
+
+	const compiled = compile(await read_block_source(options.site_dir, block_name), {
+		generate: 'client',
+		filename: component_path,
+		css: 'external',
+		name: block_name.replace(/-/g, '_')
+	})
+	await fs.writeFile(path.join(options.temp_dir, `${block_name}.client.js`), compiled.js.code)
+
+	await esbuild.build({
+		stdin: {
+			contents: `export { default } from './${block_name}.client.js'\nexport { hydrate } from 'svelte'\n`,
+			resolveDir: options.temp_dir,
+			loader: 'js'
+		},
+		bundle: true,
+		format: 'esm',
+		platform: 'browser',
+		minify: true,
+		outfile: path.join(options.output_dir, '_symbols', `${block_name}.js`),
+		logLevel: 'silent',
+		plugins: [svelte_resolver(options.svelte_base)]
+	})
+	return true
+}
+
+// JSON for an inline <script>: `<` is escaped so content can't close the tag.
+function script_json(value: unknown): string {
+	return JSON.stringify(value).replace(/</g, '\\u003c')
 }
 
 // Blocks may use their fields as bare identifiers without declaring props.
