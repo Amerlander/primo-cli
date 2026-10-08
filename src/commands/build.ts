@@ -173,6 +173,9 @@ export async function build_site(options: BuildOptions) {
 		// Per block: whether it ships a client bundle in _symbols/
 		const client_cache = new Map<string, boolean>()
 
+		// The shared svelte client runtime, built with the first client bundle
+		const svelte_runtime: SvelteRuntimeState = {}
+
 		// Cache layouts per page type
 		const layout_cache = new Map<string, Layout>()
 
@@ -206,6 +209,7 @@ export async function build_site(options: BuildOptions) {
 				site_name: config.name,
 				block_cache,
 				client_cache,
+				svelte_runtime,
 				layout_cache,
 				page_type_head_cache,
 				page_type_foot_cache,
@@ -290,6 +294,7 @@ interface BuildPageOptions {
 	site_name: string
 	block_cache: Map<string, { js: string; css: string }>
 	client_cache: Map<string, boolean>
+	svelte_runtime: SvelteRuntimeState
 	layout_cache: Map<string, Layout>
 	page_type_head_cache: Map<string, string>
 	page_type_foot_cache: Map<string, string>
@@ -360,7 +365,7 @@ async function load_page_type_foot(
 }
 
 async function build_page(options: BuildPageOptions): Promise<{ html: string; error?: string }> {
-	const { page, page_path, site_dir, temp_dir, output_dir, head_content, foot_content, site_name, block_cache, client_cache, layout_cache, page_type_head_cache, page_type_foot_cache, site_data, page_url_map } = options
+	const { page, page_path, site_dir, temp_dir, output_dir, head_content, foot_content, site_name, block_cache, client_cache, svelte_runtime, layout_cache, page_type_head_cache, page_type_foot_cache, site_data, page_url_map } = options
 
 	try {
 		const page_build_id = safe_temp_id(page._id || page.id || page_path || page.name || 'page')
@@ -501,7 +506,7 @@ async function build_page(options: BuildPageOptions): Promise<{ html: string; er
 
 		// Interactive blocks get a client bundle and hydrate in place, as on
 		// server publish. Blocks without a script ship no JavaScript.
-		const hydration_script = await generate_hydration_script(section_slots, { site_dir, temp_dir, output_dir, client_cache, svelte_base })
+		const hydration_script = await generate_hydration_script(section_slots, { site_dir, temp_dir, output_dir, client_cache, svelte_runtime, svelte_base })
 
 		// No automatic <title> — server publish emits none, and an injected
 		// title would suppress any title a page-type head renders (Svelte keeps
@@ -576,7 +581,19 @@ interface ClientBuildOptions {
 	temp_dir: string
 	output_dir: string
 	client_cache: Map<string, boolean>
+	svelte_runtime: SvelteRuntimeState
 	svelte_base: string
+}
+
+interface SvelteRuntime {
+	// e.g. /_svelte/5.57.1
+	base_url: string
+	// Output entry names (index, internal/client, store, ...)
+	entries: Set<string>
+}
+
+interface SvelteRuntimeState {
+	build?: Promise<SvelteRuntime>
 }
 
 // The module script server publish appends to the body: import each
@@ -619,6 +636,9 @@ async function bundle_block_client(block_name: string, options: ClientBuildOptio
 	})
 	await fs.writeFile(path.join(options.temp_dir, `${block_name}.client.js`), compiled.js.code)
 
+	options.svelte_runtime.build ??= build_svelte_runtime(options.svelte_base, options.output_dir)
+	const runtime = await options.svelte_runtime.build
+
 	await esbuild.build({
 		stdin: {
 			contents: `export { default } from './${block_name}.client.js'\nexport { hydrate } from 'svelte'\n`,
@@ -631,9 +651,71 @@ async function bundle_block_client(block_name: string, options: ClientBuildOptio
 		minify: true,
 		outfile: path.join(options.output_dir, '_symbols', `${block_name}.js`),
 		logLevel: 'silent',
-		plugins: [svelte_resolver(options.svelte_base)]
+		plugins: [svelte_runtime_external(runtime)]
 	})
 	return true
+}
+
+// Svelte's client runtime, built once per build into /_svelte/<version>/ and
+// imported by every block bundle (same layout as server publish). A page then
+// holds exactly one instance of each runtime module, so blocks share the
+// scheduler and store state instead of each carrying a private copy.
+// Entries: `svelte` -> index.js, `svelte/<path>` -> <path>.js; shared chunks
+// sit next to them.
+async function build_svelte_runtime(svelte_base: string, output_dir: string): Promise<SvelteRuntime> {
+	const pkg = JSON.parse(await fs.readFile(path.join(svelte_base, 'package.json'), 'utf-8')) as {
+		version: string
+		exports: Record<string, unknown>
+	}
+	const entry_points: Record<string, string> = {}
+	for (const [subpath, target] of Object.entries(pkg.exports)) {
+		const entry = svelte_runtime_entry(subpath)
+		if (!entry || !target || typeof target !== 'object') continue
+		const conditions = target as Record<string, unknown>
+		const file = conditions.browser ?? conditions.default
+		if (typeof file !== 'string' || !file.endsWith('.js')) continue
+		entry_points[entry] = path.join(svelte_base, file)
+	}
+
+	await esbuild.build({
+		entryPoints: entry_points,
+		bundle: true,
+		splitting: true,
+		format: 'esm',
+		platform: 'browser',
+		minify: true,
+		outdir: path.join(output_dir, '_svelte', pkg.version),
+		logLevel: 'silent'
+	})
+	return { base_url: `/_svelte/${pkg.version}`, entries: new Set(Object.keys(entry_points)) }
+}
+
+// Output name of a public svelte export, or undefined for exports the
+// browser can't or shouldn't load: package.json, the compiler, server
+// rendering, and `svelte/internal` (a Svelte 4 stub that only throws).
+// Type-only exports have no JS target and are skipped by the caller.
+const SERVER_ONLY_SVELTE_EXPORTS = new Set(['./package.json', './compiler', './server', './internal/server', './internal'])
+
+function svelte_runtime_entry(subpath: string): string | undefined {
+	if (SERVER_ONLY_SVELTE_EXPORTS.has(subpath) || subpath.endsWith('.json') || subpath.includes('*')) return undefined
+	return subpath === '.' ? 'index' : subpath.slice('./'.length)
+}
+
+// Leave `svelte` and `svelte/*` imports to the shared runtime, as absolute
+// /_svelte/<version>/<entry>.js URLs. Everything else is bundled per block.
+function svelte_runtime_external(runtime: SvelteRuntime): esbuild.Plugin {
+	return {
+		name: 'primo-svelte-runtime',
+		setup(build) {
+			build.onResolve({ filter: /^svelte(\/|$)/ }, (args) => {
+				const entry = svelte_runtime_entry(args.path === 'svelte' ? '.' : `./${args.path.slice('svelte/'.length)}`)
+				if (!entry || !runtime.entries.has(entry)) {
+					return { errors: [{ text: `"${args.path}" is not a browser export of svelte` }] }
+				}
+				return { path: `${runtime.base_url}/${entry}.js`, external: true }
+			})
+		}
+	}
 }
 
 // JSON for an inline <script>: `<` is escaped so content can't close the tag.

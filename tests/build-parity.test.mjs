@@ -17,6 +17,7 @@ import { run_cli, make_workspace } from './helpers/run-cli.mjs'
  * - Pages use the server's markup: header/main/footer zones, section wrappers.
  * - The page type's foot.html follows site/foot.html, verbatim.
  * - Blocks with a script get a /_symbols bundle and are hydrated on the page.
+ *   Bundles import one shared svelte runtime from /_svelte/<version>/.
  */
 
 async function write_file(root, rel, content) {
@@ -333,6 +334,67 @@ describe('primo build parity', () => {
 			const bundle = await fs.readFile(path.join(out_dir, '_symbols', 'hero.js'), 'utf8')
 			assert.match(bundle, /export\s*\{[^}]*\bhydrate\b[^}]*\}/)
 			await assert.rejects(fs.access(path.join(out_dir, '_symbols', 'nav.js')))
+		} finally {
+			await cleanup()
+		}
+	})
+
+	test('block bundles import one shared svelte runtime from /_svelte/<version>/', async () => {
+		const { version } = JSON.parse(await fs.readFile(new URL('../node_modules/svelte/package.json', import.meta.url), 'utf8'))
+		const { result, out_dir, cleanup } = await build({
+			fields: '- name: headline\n  type: text\n',
+			content: 'headline: Hello\n',
+			component: [
+				'<script>',
+				"import { fade } from 'svelte/transition'",
+				'let open = $state(false)',
+				'</script>',
+				'<button onclick={() => (open = !open)}>Toggle</button>{#if open}<p transition:fade>Open</p>{/if}',
+				''
+			].join('\n'),
+			async setup(site_dir) {
+				await write_file(site_dir, 'blocks/counter/component.svelte', [
+					'<script>',
+					"import { writable } from 'svelte/store'",
+					'const count = writable(0)',
+					'</script>',
+					'<button onclick={() => count.update((n) => n + 1)}>{$count}</button>',
+					''
+				].join('\n'))
+				await write_file(site_dir, 'page-types/default/layout.yaml', 'header:\n  - block: counter\n')
+			}
+		})
+		try {
+			assert.equal(result.code, 0, result.output)
+			const runtime_dir = path.join(out_dir, '_svelte', version)
+			for (const entry of ['index', 'internal/client', 'internal/disclose-version', 'internal/flags/legacy', 'store', 'transition', 'easing', 'motion', 'animate', 'reactivity', 'events', 'attachments', 'legacy']) {
+				await fs.access(path.join(runtime_dir, `${entry}.js`))
+			}
+			for (const server_only of ['server', 'internal/server', 'compiler', 'internal']) {
+				await assert.rejects(fs.access(path.join(runtime_dir, `${server_only}.js`)), `${server_only}.js must not be published`)
+			}
+
+			// Every import a browser follows from the block bundles must exist,
+			// and every svelte import must point into the shared runtime.
+			const seen = new Set()
+			async function follow(url) {
+				if (seen.has(url)) return
+				seen.add(url)
+				const code = await fs.readFile(path.join(out_dir, ...url.split('/').filter(Boolean)), 'utf8')
+				for (const [, spec] of code.matchAll(/(?:import|export)\s*(?:[^'"]*?from\s*)?["']([^"']+)["']/g)) {
+					assert.ok(/^\.{0,2}\//.test(spec), `${url} imports bare "${spec}"`)
+					await follow(spec.startsWith('/') ? spec : path.posix.join(path.posix.dirname(url), spec))
+				}
+			}
+			for (const block of ['hero', 'counter']) {
+				const bundle = await fs.readFile(path.join(out_dir, '_symbols', `${block}.js`), 'utf8')
+				assert.ok(bundle.length < 5000, `${block}.js still carries the runtime (${bundle.length} bytes)`)
+				assert.ok(bundle.includes(`from"/_svelte/${version}/internal/client.js"`), bundle)
+				assert.match(bundle, new RegExp(`import\\{hydrate as \\w+\\}from"/_svelte/${version.replaceAll('.', '\\.')}/index\\.js"`))
+				await follow(`/_symbols/${block}.js`)
+			}
+			assert.ok(seen.has(`/_svelte/${version}/transition.js`))
+			assert.ok(seen.has(`/_svelte/${version}/store.js`))
 		} finally {
 			await cleanup()
 		}
